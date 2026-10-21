@@ -1531,6 +1531,11 @@ func (s *Store) rollupHoursLocked(now time.Time, h HistoryConfig) (int64, error)
 	}
 	var written int64
 	for _, c := range rollupMetricColumns {
+		// `WHERE true` is not decoration: with INSERT ... SELECT, SQLite parses a
+		// bare ON as a join constraint and fails with `near "DO": syntax error`,
+		// which silently disabled every hourly rollup until it was seen in the
+		// device log. With a WHERE, the upsert clause is unambiguous.
+		//
 		// `last` is the reading closest to the end of the hour, which is what a
 		// chart labels that hour with. The subquery is written as a ts range
 		// rather than `(ts/3600)*3600 = g.h` on purpose: the range form uses the
@@ -1547,6 +1552,7 @@ func (s *Store) rollupHoursLocked(now time.Time, h HistoryConfig) (int64, error)
 			         WHERE s2.ts >= g.h AND s2.ts < g.h + 3600 AND s2.` + c + ` IS NOT NULL
 			         ORDER BY s2.ts DESC LIMIT 1)
 			FROM g
+			WHERE true
 			ON CONFLICT(ts_hour, metric) DO UPDATE SET
 				n = excluded.n, avg = excluded.avg, min = excluded.min, max = excluded.max, last = excluded.last`)
 		if err != nil {

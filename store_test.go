@@ -19,9 +19,11 @@ func TestPruneWithRollupDoesNotDeadlock(t *testing.T) {
 	}
 	defer st.Close()
 
-	now := time.Now().Unix()
-	for i := 0; i < 3; i++ {
-		if err := st.InsertSample(sampleFromSnapshot(Snapshot{}, 1, now-int64(i*60))); err != nil {
+	// Samples in *complete* past hours: the rollup deliberately skips the hour in
+	// progress, so nothing in the current hour would exercise its SQL at all.
+	now := time.Now()
+	for _, back := range []time.Duration{3 * time.Hour, 2 * time.Hour, 2*time.Hour + time.Minute} {
+		if err := st.InsertSample(sampleFromSnapshot(Snapshot{}, 1, now.Add(-back).Unix())); err != nil {
 			t.Fatalf("InsertSample: %v", err)
 		}
 	}
@@ -32,13 +34,30 @@ func TestPruneWithRollupDoesNotDeadlock(t *testing.T) {
 
 	done := make(chan PruneResult, 1)
 	go func() {
-		res, _ := st.Prune(time.Now(), h)
+		res, _ := st.Prune(now, h)
 		done <- res
 	}()
+	var res PruneResult
 	select {
-	case <-done:
+	case res = <-done:
 	case <-time.After(15 * time.Second):
 		t.Fatal("Prune did not return within 15s — the store is deadlocked (check for a re-entrant s.mu lock)")
+	}
+	// The rollup runs inside Prune and reports its own failure instead of
+	// aborting the prune, so a broken statement stayed invisible in the log
+	// while never writing a single aggregate row.
+	if res.RollupError != "" {
+		t.Fatalf("rollup failed: %s", res.RollupError)
+	}
+	if res.RollupRows == 0 {
+		t.Fatal("rollup wrote no hourly aggregates for samples in complete past hours")
+	}
+	roll, err := st.QueryRollup([]string{"battery_capacity_pct"}, now.Add(-6*time.Hour).Unix(), now.Unix(), 100)
+	if err != nil {
+		t.Fatalf("QueryRollup: %v", err)
+	}
+	if len(roll.Rows) == 0 || roll.Count == 0 {
+		t.Fatalf("QueryRollup returned no rows after a successful rollup (%+v)", roll)
 	}
 }
 
