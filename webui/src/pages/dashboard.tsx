@@ -163,7 +163,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <Stat label="CPU 占用" value={fmtPct(cpu.usage_percent)} />
           <Stat label="GPU 占用" value={fmtNum(gpu.busy_percent, 0)} unit="%" />
-          <Stat label="GPU 频率" value={fmtHz(Number(gpu.current_hz) / 1000)} />
+          <Stat label="GPU 频率" value={fmtHz(Number(gpu.current_hz) / 1e6)} />
           <Stat label="GPU 温度" value={dash(gpu.temp_c)} unit="°C" />
         </div>
         {Array.isArray(cpu.per_core_percent) && cpu.per_core_percent.length ? (
