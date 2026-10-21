@@ -38,7 +38,9 @@ export default function Files() {
   const [hidden, setHidden] = useState(false);
 
   const loadRoot = async () => {
-    const r = await apiGet<any>("/files/", 15000);
+    // The file service lives at /files/, NOT under /api/v1 — apiGet would request
+    // /api/v1/files/ and get a 404 (seen in the browser during verification).
+    const r = await rawRequest<any>("/files/", { timeoutMs: 15000 });
     if (r.ok) {
       setRoot(r.data);
       const shares: Share[] = (r.data as any).shares || [];
@@ -50,7 +52,7 @@ export default function Files() {
   const browse = async (sh = share, p = path) => {
     if (!sh) return;
     setBusy(true);
-    const r = await apiGet<any>("/files/" + sh + "/" + p + "?json=1", 20000);
+    const r = await rawRequest<any>("/files/" + sh + "/" + p + "?json=1", { timeoutMs: 20000 });
     setBusy(false);
     if (r.ok && r.data) {
       // A single file answers with meta, a directory with entries.
