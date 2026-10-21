@@ -1,6 +1,7 @@
 #!/system/bin/sh
 # Stop everything when the module is removed. /data/adb/phoneserver is left in
-# place on purpose: a reinstall then keeps the same API token and push URL.
+# place on purpose: a reinstall then keeps the same API token, config and the
+# history database.
 MODDIR=${0%/*}
 DATA=/data/adb/phoneserver
 BIN="$MODDIR/bin/phoneserver"

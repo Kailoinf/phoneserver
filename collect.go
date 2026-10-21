@@ -435,7 +435,9 @@ type Packages struct {
 	Error              string `json:"error,omitempty"`
 }
 
-// Snapshot is the "everything" document, also the push payload.
+// Snapshot is the "everything" telemetry document that GET /api/v1/all answers
+// with. It is read-only on purpose: nothing in this server writes it anywhere
+// but the local history database.
 type Snapshot struct {
 	CollectedAt        string    `json:"collected_at"`
 	DeviceID           string    `json:"device_id"`

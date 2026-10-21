@@ -1,350 +1,645 @@
-# Phone Data Server · 手机数据服务
+# Phone Control Server
 
-> Turn an Android phone's telemetry into a JSON REST API, and optionally POST it to a server you own.
-> 把手机的运行数据变成 RESTful JSON 接口，并可按间隔主动推送到你自己的服务器。
+把你自己的 Android 手机变成一台**可编程的设备**：一个跑在手机上的 root 守护进程，把遥测、屏幕、输入、应用、通知、相机麦克风、文件系统和 MCP 全部暴露成 HTTP / WebDAV / MCP 接口。
 
-KernelSU / Magisk 模块形态，主体是**一个静态链接的 Go 二进制**（linux/arm64）。手机上不需要 Python、Node 或任何运行时；宿主机也不需要联网就能交叉编译（只用标准库）。
-
-- **REST 接口**：18 个数据段，全部只读 GET，另有 PUT 改配置、POST 触发推送
-- **管理器 WebUI**：在 KernelSU / SukiSU 管理器里直接打开，实时仪表盘 + 服务控制
-- **网页仪表盘**：浏览器打开 `http://<手机IP>:8080/` 即可，深色卡片、3 秒自动刷新
-- **云端推送**：按间隔把同一份文档 POST 给你的服务器，失败重试，结果可查
-- **本地历史**：默认每 10 秒把数据写进手机本地的 SQLite 库（标量指标 + 完整文档 + 日志），不依赖云端也能回看曲线，自动按保留策略清理
-- **令牌鉴权**：默认生成随机令牌，支持 `X-API-Key` / `Bearer` / `?key=`
-- **看门狗**：服务崩了 10 秒内自动拉起，开机自启
+它是 Magisk / KernelSU 模块，随开机自启，被 watchdog 守护。所有数据留在手机上：**没有任何向远端服务器上传的功能，也没有云端依赖**。
 
 ---
 
-## 安装
+## 目录
 
-从 [Releases](../../releases) 下载 `phoneserver-module.zip`，在 KernelSU / Magisk 管理器里当作模块安装，然后**重启一次**（KernelSU 会先放进 `modules_update/`，重启才搬进 `modules/` 并生效）。
+- [能力一览](#能力一览)
+- [安全模型（先读这个）](#安全模型先读这个)
+- [安装、升级、卸载](#安装升级卸载)
+- [快速开始](#快速开始)
+- [API](#api)
+  - [遥测](#遥测)
+  - [截图与实时画面](#截图与实时画面)
+  - [输入与 UI 自动化](#输入与-ui-自动化)
+  - [应用](#应用)
+  - [设备控制](#设备控制)
+  - [通知与消息](#通知与消息)
+  - [相机与麦克风](#相机与麦克风)
+  - [文件服务与 WebDAV](#文件服务与-webdav)
+  - [受控端点：shell 与电源](#受控端点shell-与电源)
+  - [配置](#配置)
+  - [历史数据与数据质量](#历史数据与数据质量)
+- [MCP（给 AI agent 用）](#mcp给-ai-agent-用)
+- [WebUI](#webui)
+- [已知限制](#已知限制)
+- [常见故障排查](#常见故障排查)
+- [运维](#运维)
+- [开发者](#开发者)
 
-命令行方式：
+---
+
+## 能力一览
+
+| 能力 | 端点 | 依赖 |
+|---|---|---|
+| 遥测（电池/CPU/GPU/内存/存储/温度/网络/Wi-Fi/进程/包） | `/api/v1/*` | 无 |
+| 截图 | `GET /api/v1/screenshot` | 无（平台的 `screencap`） |
+| 实时画面（硬件 H.264，低延时低流量） | `GET /api/v1/stream/screen` | 无（平台的 `screenrecord`） |
+| 实时画面降级（webp 帧） | `GET /api/v1/stream/screen/mjpeg` | 无 |
+| 输入（点击/滑动/手势/文本/按键） | `POST /api/v1/input/*` | 无（中文输入需要桥） |
+| UI 自动化（控件树、按文字点击） | `/api/v1/ui/*` | 无（`uiautomator`） |
+| 应用（列表/启动/停止/前台） | `/api/v1/apps*` | 无 |
+| 设备控制（屏幕/音量/亮度/旋转/手电/振动/剪贴板/TTS/红外/媒体/Wi-Fi/传感器/定位） | `/api/v1/control/*` | 大部分需要 Termux:API 桥 |
+| 通知（读取/发送） | `/api/v1/notifications*` | 无（root 读 `dumpsys notification`） |
+| 消息（短信/通话记录/联系人） | `/api/v1/messages/*` | 无（content provider） |
+| 相机（拍照、低帧率预览） | `/api/v1/camera/*` | Termux:API 桥 |
+| 麦克风（录音） | `/api/v1/mic/*` | Termux:API 桥 |
+| 文件服务（浏览/上传/下载） | `/files/` | 无 |
+| WebDAV（映射为网络驱动器） | `/dav/` | 无 |
+| MCP（stdio + HTTP） | `phoneserver -mcp`、`POST /mcp` | 无 |
+| 本地历史（SQLite，带数据质量报告） | `/api/v1/history*` | 无 |
+| 受控：root shell、重启/关机 | `/api/v1/shell`、`/api/v1/device/*` | 需配置开关 |
+
+---
+
+## 安全模型（先读这个）
+
+**1）默认只监听本机。**
+
+```json
+{ "listen": "127.0.0.1:8080" }
+```
+
+装好之后，同一局域网的任何设备都连不上。要从电脑访问，必须**显式打开局域网开关**并把 `listen` 改成手机的局域网地址：
+
+```json
+{
+  "listen": "192.168.5.29:8080",
+  "security": { "allow_non_loopback_listen": true }
+}
+```
+
+两道闸门是有意的：`listen` 写错了不会生效（服务会回落到 `127.0.0.1:<port>` 并在日志里说明），而且 `PUT /api/v1/config` 会直接拒绝在开关关闭时把 `listen` 设成非回环地址。打开了就意味着**能路由到这个端口的人都算进来，token 是唯一凭据**——别放在不可信网络里，也建议在路由器侧限制。
+
+获取手机局域网 IP：
 
 ```sh
+adb shell 'ip -4 addr show wlan0 | grep inet'
+```
+
+**2）token 是唯一凭据。**
+
+首次启动自动生成 24 字节随机 token，存在 `/data/adb/phoneserver/config.json`（0600）。四种传法：
+
+```sh
+# header（推荐）
+curl -H 'X-API-Key: <token>' http://127.0.0.1:8080/api/v1/all
+# bearer
+curl -H 'Authorization: Bearer <token>' http://127.0.0.1:8080/api/v1/system
+# URL 参数（浏览器/链接用）
+curl 'http://127.0.0.1:8080/api/v1/battery?key=<token>'
+# HTTP Basic（WebDAV 客户端用；用户名任意，密码=token）
+curl -u any:<token> 'http://127.0.0.1:8080/files/'
+```
+
+`GET /api/v1/health`、`/`（自带仪表盘）、`/ui/`（完整界面）、`/files/` 与 `/dav/` 的**页面本身**不需要 token，但页面里的每个数据请求都需要——所以浏览器打开后要把 token 填进页面里的输入框（存在 localStorage）。
+
+**3）危险能力默认全关。**
+
+| 开关 | 默认 | 打开后能做什么 |
+|---|---|---|
+| `security.allow_shell` | `false` | `POST /api/v1/shell` 以 root 执行任意命令 |
+| `security.allow_power_commands` | `false` | 重启、进入 recovery/bootloader、关机 |
+| `files.read_only` | `false` | 文件服务整体只读 |
+| `files.allow_delete` | `false` | 允许删除文件/目录 |
+| `files.webdav` / `files.http_files` | `true` | 分别控制两个前门 |
+
+**4）文件服务没有目录穿越面。** URL 里只有「共享名」（`files.shares` 的白名单条目），从不接受裸文件系统路径，且每次请求解析后都会做符号链接解析并再次校验是否仍在共享根内。
+
+---
+
+## 安装、升级、卸载
+
+```sh
+# 交叉编译 + 打包（在仓库根目录）
+./build.sh
+
+# 安装（两种方式都可以）
+#  a) 管理器里安装 phoneserver-module.zip
+#  b) 命令行
 adb push phoneserver-module.zip /data/local/tmp/
-adb shell su -c 'ksud module install /data/local/tmp/phoneserver-module.zip'
+adb shell 'ksud module install /data/local/tmp/phoneserver-module.zip'
+
+# 安装后需要重启手机：模块先落到 /data/adb/modules_update/，重启后才生效
 adb reboot
 ```
 
-配置与日志放在 `/data/adb/phoneserver/`（**刻意放在模块目录之外**，所以重装/升级模块不会丢令牌和推送设置）。
+重启后自检（`action.sh` 的按钮也会打印同样内容）：
+
+```sh
+adb shell 'sh /data/adb/modules/phoneserver/action.sh'
+```
+
+卸载：
+
+```sh
+adb shell 'ksud module uninstall phoneserver'
+```
+
+卸载会停掉进程，但**保留** `/data/adb/phoneserver/`（配置、token、日志、历史库），重新安装后原样继续用。要彻底清理就手动 `rm -rf /data/adb/phoneserver`。
+
+---
 
 ## 快速开始
 
 ```sh
-# 取令牌（首次开机会自动生成）
-adb shell su -c 'grep api_token /data/adb/phoneserver/config.json'
-# 或者点管理器里模块卡片上的 Action 按钮，它会打印地址和令牌
+# 1. 取 token（只在手机本地可读）
+adb shell 'grep -o "\"api_token\": \"[^\"]*\"" /data/adb/phoneserver/config.json'
 
-curl http://192.168.1.50:8080/api/v1/health                       # 免鉴权
-curl -H 'X-API-Key: <令牌>' http://192.168.1.50:8080/api/v1/all   # 全部数据
+# 2. 健康检查（不需要 token）
+adb shell 'curl -s http://127.0.0.1:8080/api/v1/health'
+
+# 3. 一切正常的话，端点索引会列出全部能力
+adb shell 'curl -s -H "X-API-Key: <token>" http://127.0.0.1:8080/api/v1/endpoints'
+
+# 4. 手机上的仪表盘 / 完整界面
+adb shell 'curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/'
+adb shell 'curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/ui/'
 ```
 
-浏览器直接打开 `http://192.168.1.50:8080/` 就是实时仪表盘。
+打开局域网访问后，在电脑浏览器里：
 
-## API 端点
+```
+http://192.168.5.29:8080/       # 轻量仪表盘（遥测 + 历史面板 + 截图）
+http://192.168.5.29:8080/ui/    # 完整多页面界面（控制、实时画面、文件、配置…）
+http://192.168.5.29:8080/files/ # 文件浏览/上传
+```
 
-| 方法 | 路径 | 内容 |
-|---|---|---|
-| GET | `/api/v1/health` | 存活、服务时长、是否开了鉴权/推送（免鉴权） |
-| GET | `/api/v1/endpoints` | 机器可读的端点索引 |
-| GET | `/api/v1/all` | 全部 18 段合成一份文档 |
-| GET | `/api/v1/device` | 品牌/机型/代号、ROM、版本、内核、基带、分区槽位、解锁状态 |
-| GET | `/api/v1/props` | 完整 `getprop`（1000+ 键，缓存 10 分钟） |
-| GET | `/api/v1/battery` | 电量、状态、健康度%、循环次数、mAh、温度、电流、电压、剩余时间 |
-| GET | `/api/v1/power` | 所有 `/sys/class/power_supply` 节点 + usb/wireless + 屏幕唤醒状态 |
-| GET | `/api/v1/display` | 屏幕开关、亮度与上限 |
-| GET | `/api/v1/cpu` | 每核当前/最低/最高频率、调度器、总与单核占用、负载 |
-| GET | `/api/v1/gpu` | Adreno 占用%、频率、温度、可用档位 |
-| GET | `/api/v1/memory` | `/proc/meminfo` 全项 |
-| GET | `/api/v1/storage` | 各挂载点总量/可用/占用%/文件系统/是否可写 |
-| GET | `/api/v1/thermal` | 热区（摄氏度，含原始值），非温度项单独列出 |
-| GET | `/api/v1/network` | 每张网卡状态/MAC/IP/累计计数 + **实时速率** |
-| GET | `/api/v1/network/wifi` | SSID、BSSID、IP、RSSI（含百分比）、协商速率、频段/信道、协议、收发包 |
-| GET | `/api/v1/system` | 运行时长、开机时刻、内核、SELinux、负载、进程数、时区 |
-| GET | `/api/v1/processes` | 进程数 + RSS 前 15 |
-| GET | `/api/v1/packages` | 安装包统计（总/系统/用户/禁用） |
-| GET | `/api/v1/config` | 当前配置（密钥脱敏） |
-| PUT | `/api/v1/config` | 改推送地址/间隔/令牌/TTL/端口 |
-| GET | `/api/v1/push` | 推送状态：计数、上次结果、上次错误 |
-| POST | `/api/v1/push` | 立刻推送一次，返回结果 |
-| GET | `/api/v1/history` | 查询历史样本（`metrics`/`since`/`until`/`limit`/`stats`；响应含 `carried_columns`） |
-| GET | `/api/v1/history/metrics` | 可查询的指标列清单 |
-| GET | `/api/v1/history/logs` | 查询库内日志（`grep`/`level`/`since`） |
-| GET | `/api/v1/history/snapshot` | 取回某个时刻的完整文档（可只取一段） |
-| GET | `/api/v1/history/stats` | 库大小、行数、增长速度、耗电估算 |
-| GET | `/api/v1/screenshot` | 当前屏幕画面，默认 WebP（**只在请求时产生、不入库、不推送**） |
-| POST | `/api/v1/history/prune` | 立刻执行保留策略 |
+`/ui/` 与 `/files/` 的页面会自己提示输入 token（Basic 或页面输入框）。
 
-读端点限定 GET，其他方法返回 405；除 `/api/v1/health` 外都需要令牌。
+---
 
-## 数据可信度：单位和坑（重要）
+## API
 
-这个模块在真实设备上调试出来，下面几条是实测结论，不是猜测：
+全部端点都写死了方法：只读端点是 **GET-only**（用别的动词会得到 405 + `Allow`），写端点只收 POST/PUT。响应统一是 JSON（截图/音频/画面流除外），错误形如：
 
-- **电源节点的单位不统一。** 内核 `power_supply` 约定是微伏/微安（`usb/voltage_max=4998000` 即 5V），但同一颗芯片上有些节点用毫伏（某些机型的 `wireless` 报 `3827` 即 3.827V）。所以每个值都同时给**原始整数**（`*_raw`）和换算值（`*_v` / `*_a`）。数字看着不对时以 `*_raw` 为准。
-- **`/sys/class/thermal/` 里不是每个"热区"都是温度。** 充电 IC 会把**电流限制档位**和**电池电压**也通过这个接口暴露出来（如 `pm7550ba-ibat-lvl0` 的 `187` 是 187mA，`vbat` 的 `3737` 是 3.737V）。盲信目录名会得到"187°C"这种荒谬读数。本模块会做数值合理性判断（-40…150°C）并按名字模式排除 `ibat/vbat/volt/curr/adc/lvlN`，被排除的项放进 `non_temperature_zones` 并保留原始值，绝不会出现在 `max_temp_c` 里。
-- **热区的单位也不统一。** 同一台机器上，多数区域报毫摄氏度（`36800` = 36.8°C），个别区域直接报整度（`58` = 58°C），还有 `-273000`（-273°C，即"传感器不可用"的哨兵值）。换算规则：绝对值 ≥ 1000 按毫度除 1000，否则原样（因为小于 1000 的值不可能是毫度温度）。
-- **CPU 与网络的"实时值"是两次请求之间的差值**，所以带 `sample_interval_ms`；服务刚启动时的第一次响应没有参照，速率为 0。
-- **`current_now` 的正负号由驱动决定**，不要用符号判断充放电——用 `status`；`power.usb.online` 才表示"是否真的接入了外部电源"。插着一个输出能力不足的 USB 口（比如电脑的 5V/0.5A）时，很可能 `online=1` 但 `status=Discharging`——因为手机功耗大于输入功率，这是真的在净放电。
+```json
+{ "error": "...", "status": 403, "server_version": "2.0.0" }
+```
 
-## 云端推送
+时间戳一律 RFC3339（手机本地时区）。索引端点 `GET /api/v1/endpoints` 是权威清单，下面是分组说明。
+
+### 遥测
 
 ```sh
-curl -X PUT -H 'X-API-Key: <令牌>' -H 'Content-Type: application/json' \
-  -d '{"push":{"enabled":true,"url":"https://example.com/ingest","interval_seconds":60,
-               "bearer_token":"可选共享密钥","retries":3}}' \
-  http://<手机IP>:8080/api/v1/config
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/all          # 全部
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/battery
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/{device,props,power,display,cpu,gpu,memory,storage,thermal,network,network/wifi,system,processes,packages}
 ```
 
-每个间隔 POST 一次：
+昂贵来源带 TTL 缓存（`getprop` 10 分钟、`cmd wifi status` 5 秒、`dumpsys power` 10 秒、包列表 5 分钟、`/proc` 扫描 10 秒），所以 3 秒一次的仪表盘轮询不会把系统敲疼。
+
+### 截图与实时画面
+
+```sh
+# 截图：默认 webp q80；也支持 jpeg/png；meta=1 返回 JSON 元信息（含尺寸/耗时）
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/screenshot?meta=1&quality=70&scale=0.5'
+curl -H 'X-API-Key: <t>' -o shot.png 'http://127.0.0.1:8080/api/v1/screenshot?format=png&display=0'
+```
+
+`FLAG_SECURE` 的窗口（银行、部分聊天应用）会被系统挡成黑帧——这是平台保护，本项目不去绕过。
+
+实时画面用设备自带的硬件编码器（`screenrecord --output-format=h264`），码流是标准 Annex-B：
+
+```sh
+# 电脑上直接看（原始 H.264 直传）
+mpv --no-cache --demuxer-lavf-format=h264 \
+  "http://192.168.5.29:8080/api/v1/stream/screen?raw=1&key=<t>"
+ffplay -fflags nobuffer -flags low_delay -i \
+  "http://192.168.5.29:8080/api/v1/stream/screen?raw=1&key=<t>"
+
+# 参数：size=720x1560 & bitrate=3000000 & display=<id> & wake=1 & raw=1
+curl -H 'X-API-Key: <t>' -o out.h264 \
+  'http://127.0.0.1:8080/api/v1/stream/screen?size=720x1560&bitrate=2000000'
+```
+
+非 `raw` 模式的响应体协议（供网页播放器实现，`X-Stream-Protocol: annexb-len-prefix`）：
+
+1. 第一块是一行 UTF-8 JSON + `\n`：
+   ```json
+   {"protocol":"annexb-len-prefix","codec":"H.264","avc":"avc1.640028","width":720,"height":1560,
+    "bitrate":3000000,"fps_hint":60,"size":"720x1560","started_at":"...","display_woken":true}
+   ```
+   `avc` 由 SPS 解析而来，直接喂给浏览器的 `VideoDecoder.configure({codec})`。
+2. 之后每个访问单元（一帧）= 4 字节大端长度 + Annex-B 原始字节（含起始码）。
+
+其它画面端点：
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/stream/status'   # 活跃编码器、实测帧率/码率
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/stream/display'  # 现在能不能开流（含真实探测结果）
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/stream/screen/mjpeg?fps=2&width=540'  # webp 帧降级
+```
+
+**熄屏时 `screenrecord` 会直接失败**（`ERROR: INVALID_LAYER_STACK`），所以开流前要先唤醒屏幕；`stream.wake_display=true`（默认）时服务会自己 `input keyevent KEYCODE_WAKEUP`，并在握手 JSON 里如实报告 `display_woken`。需要长时间看画面时打开 `stream.keep_display_on`，它会在流存活期间保持常亮、最后一个客户端断开后恢复原值。
+
+### 输入与 UI 自动化
+
+```sh
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"x":640,"y":1386}' http://127.0.0.1:8080/api/v1/input/tap
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"x1":640,"y1":2000,"x2":640,"y2":600,"duration_ms":300}' http://127.0.0.1:8080/api/v1/input/swipe
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"points":[[100,1500],[500,1500],[500,900]],"duration_ms":600}' http://127.0.0.1:8080/api/v1/input/gesture
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"text":"hello world"}' http://127.0.0.1:8080/api/v1/input/text
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"key":"HOME"}' http://127.0.0.1:8080/api/v1/input/key
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"keys":["HOME","BACK"]}' http://127.0.0.1:8080/api/v1/input/keys
+```
+
+- `gesture` 走真实的 `motionevent DOWN/MOVE.../UP` 序列（单条 `swipe` 表达不了拐弯的路径），手机支持的坐标是 1280×2772。
+- **`input text` 只能注入 ASCII**：系统本身丢弃非 ASCII 字符。中文/emoji 走「剪贴板 + `KEYCODE_PASTE`」这条路（需要 Termux:API 桥），响应里的 `method` 字段会告诉你是哪条路。
+
+UI 控件树与「按文字点」：
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/ui/dump'                 # 扁平化的控件列表（文本/边界/中心/可点）
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/ui/dump?all=1'           # 全部节点，不过滤
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/ui/find?text=登录&contains=1'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/ui/current'              # 前台 app、焦点窗口、键盘、锁屏
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"text":"登录"}' http://127.0.0.1:8080/api/v1/ui/click
+```
+
+一次 `uiautomator dump` 在这台设备上约 2 秒（它要起一个 Java 进程），所以结果有短时缓存（`?max_age_ms=` 可调）。**锁屏或熄屏时 dump 只会给出 keyguard 节点**，响应里的 `window.note` 会说明这一点，而不是假装「这个 app 没有文字」。
+
+### 应用
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/apps?grep=termux&limit=20'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/apps?package=com.termux'   # 附带解析出的启动 Activity
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/apps/current
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/apps/activity            # dumpsys activity 摘要
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"package":"com.termux","wait_ms":800}' http://127.0.0.1:8080/api/v1/apps/launch
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"package":"com.termux","force_stop_first":true}' http://127.0.0.1:8080/api/v1/apps/launch
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"package":"com.termux"}' http://127.0.0.1:8080/api/v1/apps/stop
+```
+
+启动的响应会说真话：`foreground_before` / `foreground_after` / `changed_foreground`，如果 intent 被接受但前台是别的包（锁屏、权限弹窗抢焦点），会给出 `warning`。
+
+包列表里**没有应用名**：读 APK 标签需要 `aapt`，这台设备没有。可用的标识是包名和 `path`。`pm list packages -3` 在 HyperOS 上包含小米预装（`/data/app`），所以本服务把它标成 `updated`，而不是「用户安装的」。
+
+### 设备控制
+
+```sh
+POST /api/v1/control/screen      {"action":"on|off|toggle|wake|sleep"}
+POST /api/v1/control/volume      {"action":"up|down|mute"}
+POST /api/v1/control/brightness  {"value":120}     或 {"percent":50} 或 {"auto":true}
+POST /api/v1/control/rotation    {"value":"0|1|2|3|auto"}
+POST /api/v1/control/torch       {"on":true}
+POST /api/v1/control/vibrate     {"ms":300}
+POST /api/v1/control/toast       {"text":"hi"}
+POST /api/v1/control/clipboard   {"action":"get"|"set","text":".."}
+POST /api/v1/control/tts         {"text":"说点什么"}
+POST /api/v1/control/ir          {"freq_hz":38000,"pattern":"9000,4500,560,560"}   或 {"frequencies":true}
+POST /api/v1/control/media       {"action":"play|pause|stop|info","file":"/sdcard/x.mp3"}  或 {"action":"next|prev|playpause"}
+POST /api/v1/control/wifi        {"on":true}
+GET  /api/v1/control/sensors                    # 传感器列表；?sensor=<name>&n=5 取读数
+GET  /api/v1/control/location                   # 最后已知位置
+GET  /api/v1/control/audio                      # 音量流状态
+```
+
+白色的（靠平台命令实现，不需要桥）：屏幕开关、音量、亮度、旋转、媒体键。彩色的（靠 Termux:API 的 app 上下文实现）：手电、振动、Toast、剪贴板、TTS、红外、媒体播放、Wi-Fi 开关、传感器、定位——桥不可用时这些端点返回 503 并告诉你缺什么。
+
+这台手机有 **IR 发射器**（`android.hardware.consumerir`），所以万能遥控类的自动化是可行的；`GET /api/v1/control/ir` 带 `frequencies:true` 可以读出设备支持的载波频率。
+
+### 通知与消息
+
+通知走 root 自己的 `dumpsys notification --noredact`，**不需要任何权限、不依赖任何 App**：
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/notifications?limit=20'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/notifications?include_ongoing=1&grep=微信'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/notifications?package=com.tencent.mm&since_ms=1792000000000'
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"title":"服务器","text":"构建完成","id":"build"}' http://127.0.0.1:8080/api/v1/notifications/post
+```
+
+字段：`title` / `text` / `big_text` / `ticker_text` / `package` / `uid` / `channel` / `importance` / `when_ms` + `when`（本地时间）/ `ongoing` / `clearable` / `foreground_service` / `actions` / `progress`。解析器是防御式的：`dumpsys` 的文本格式不是稳定 API，读不懂的记录会带 `parse_incomplete: true`，`?raw=1` 直接把原始文本给你自己看。常驻通知默认被过滤（它们通常是前台服务噪声），`include_ongoing=1` 可以带上。
+
+短信/通话/联系人走 content provider：
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/messages/list?source=sms&limit=20'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/messages/list?source=calls&limit=20'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/messages/list?source=contacts&limit=50'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/messages/search?source=sms&q=验证码'
+```
+
+**这台手机没有插 SIM 卡**，所以短信与通话表就是空的——空结果会带 `empty_reason` 字段说明原因，不会让你猜是不是接口坏了。
+
+### 相机与麦克风
+
+相机和麦克风在 Android 上只能由**应用进程**使用，root 进程自己没有这两项权限。所以本服务把这两个能力委托给手机上已装的 Termux:API：守护进程以 Termux 的 uid 运行它的命令行客户端。
+
+```sh
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/bridge/status   # 桥是否可用、卡在哪一条策略
+curl -X POST -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/bridge/fix   # 授权 + 唤醒锁 + 拉前台，一次修好
+```
+
+```sh
+# 拍照：真实 JPEG（这台设备 4096x3072，约 5 MB），可选缩小/转码
+curl -H 'X-API-Key: <t>' -o photo.jpg 'http://127.0.0.1:8080/api/v1/camera/photo'
+curl -H 'X-API-Key: <t>' -o small.webp 'http://127.0.0.1:8080/api/v1/camera/photo?camera=1&format=webp&maxwidth=1024&quality=70'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/camera/photo?meta=1'   # 只看元信息（尺寸/字节/耗时）
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/camera/info             # 摄像头能力（支持的尺寸等）
+
+# 低帧率预览（反复拍照再压成 webp，当作「看得到就行」的取景器）
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/camera/preview?fps=2&width=540&seconds=30'
+
+# 录音：默认 10 秒；可指定编码器/码率/采样率/声道
+curl -H 'X-API-Key: <t>' -o rec.m4a 'http://127.0.0.1:8080/api/v1/mic/record?seconds=10'
+curl -H 'X-API-Key: <t>' -o hi.m4a  'http://127.0.0.1:8080/api/v1/mic/record?seconds=30&encoder=aac&bitrate=192&rate=48000&channels=2'
+curl -H 'X-API-Key: <t>' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/v1/mic/start
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/mic/status
+curl -H 'X-API-Key: <t>' -X POST http://127.0.0.1:8080/api/v1/mic/stop --output rec.m4a
+```
+
+两条设备策略必须满足，服务会自己摆好并如实报告：
+
+| 能力 | 平台要求 | 服务怎么做到 |
+|---|---|---|
+| 麦克风 | 该 uid 至少是 `FOREGROUND_SERVICE` 状态 | `termux-wake-lock` |
+| 相机 | 该 uid 处于前台（TOP） | `am start com.termux/.app.TermuxActivity`（可能点亮屏幕；`bridge.wake_screen_for_camera` 可控） |
+
+不满足时的报错是可以直接看懂的，例如：
+
+```
+CAMERA_DISABLED (1): connectHelper: cannot open camera "0" from background (proc state 10)
+```
+
+首次使用建议先 `POST /api/v1/bridge/fix`：它会 `pm grant` 相机/麦克风/短信/通话/联系人/通知权限、设好 app-op、拿唤醒锁、把 Termux 拉到前台，并把结果原样报回来。没装 Termux:API 时这些端点返回 **503** + 修复提示，其余功能不受影响。
+
+相机/麦克风的产物**不入库、不上传**：响应直接给字节，手机上的临时文件除非 `capture.keep_capture_files=true` 否则马上删掉。
+
+### 文件服务与 WebDAV
+
+两个前门，一套实现：
+
+- `http(s)://<host>:<port>/files/` —— 浏览器友好：目录列表（HTML）、下载、上传（表单或 PUT）、新建目录、重命名、删除。
+- `http(s)://<host>:<port>/dav/` —— WebDAV：可以挂载成电脑上的网络驱动器（Windows 映射网络驱动器 / macOS「连接服务器」/ rclone / davfs2 / 各类文件管理器）。
+
+共享目录是白名单（默认 `sdcard` = `/storage/emulated/0`、`download` = `.../Download`、`tmp` = `/data/local/tmp`），可以自己增删：
+
+```json
+{ "files": { "shares": { "sdcard": "/storage/emulated/0", "tmp": "/data/local/tmp", "root": "/" } } }
+```
+
+用起来：
+
+```sh
+T='-H "X-API-Key: <t>"'
+curl $T http://127.0.0.1:8080/files/                          # 共享列表（JSON；?listing=1 给 HTML）
+curl $T 'http://127.0.0.1:8080/files/sdcard/Download/?json=1' # 目录内容
+curl $T -o file.zip 'http://127.0.0.1:8080/files/sdcard/Download/file.zip'
+curl $T -T ./local.bin 'http://127.0.0.1:8080/files/tmp/local.bin'          # PUT 上传
+curl $T -T ./local.bin 'http://127.0.0.1:8080/files/tmp/a/b/c.bin?mkdir=1'  # 自动建父目录
+curl $T -F 'file=@./local.bin' 'http://127.0.0.1:8080/files/tmp/'           # 表单上传（浏览器同样用法）
+curl $T -X POST 'http://127.0.0.1:8080/files/tmp/newdir?op=mkcol'
+curl $T -X POST 'http://127.0.0.1:8080/files/tmp/a.bin?op=move&dest=tmp/b.bin'
+curl $T -X DELETE 'http://127.0.0.1:8080/files/tmp/old.bin'                 # 需要 allow_delete
+curl $T -X GET -r 0-1023 'http://127.0.0.1:8080/files/sdcard/Download/file.zip'  # Range 续传
+```
+
+WebDAV：
+
+```sh
+curl -u any:<t> -X PROPFIND -H 'Depth: 1' http://127.0.0.1:8080/dav/sdcard/
+curl -u any:<t> -X MKCOL http://127.0.0.1:8080/dav/tmp/newdir
+curl -u any:<t> -T ./x.bin      http://127.0.0.1:8080/dav/tmp/x.bin
+```
+
+- Windows：资源管理器 →「映射网络驱动器」→ 地址填 `http://192.168.5.29:8080/dav/sdcard/`，用 token 作密码。
+- Windows 需要 HTTP 基本认证走明文时才肯挂：`davclient` 默认拒绝 http。要么用 `net use` 命令，要么在注册表里放开 `BasicAuthLevel`（见下），要么只在手机本机用。
+- macOS：Finder →「前往」→「连接服务器」→ `http://192.168.5.29:8080/dav/sdcard/`。
+- rclone：`rclone config` → 选 `webdav` → url `http://192.168.5.29:8080/dav/sdcard/`，user 任意、pass = token。
+- Linux/davfs2：`mount -t davfs http://192.168.5.29:8080/dav/sdcard/ /mnt/phone`。
+
+工程上值得知道的几点：
+
+- **写入是「先写临时文件再 rename」**，所以中断的传输不会留下半截文件覆盖掉原文件；替换已有文件时会沿用原文件的权限位。
+- **`files.read_only` 关掉所有写**（both doors）；`files.allow_delete` 单独控制删除，上传仍可用。
+- **`LOCK`/`UNLOCK` 会被应答但不强制**：Windows 与 macOS 在写入前要 LOCK，本服务返回一个合法形状的 lock token，但不维护锁表，因此**同一个目录被多个客户端同时写时不会有互斥**——这一点在响应体和日志里都写明了。
+- 上传体积上限 `files.max_upload_mb`（默认 512），超了返回 413。
+- 目录条目受 `files.max_list_entries` 限制（默认 2000），截断时响应会说明。
+
+`/files/` 与 `/dav/` 的认证接受 `X-API-Key`、`?key=`、`Authorization: Bearer`，也接受 **HTTP Basic（用户名任意，密码=token）**——WebDAV 客户端通常只能给 Basic，浏览器也一样。
+
+### 受控端点：shell 与电源
+
+```sh
+# 需要 security.allow_shell=true，否则 403 并说明开关名
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"cmd":"ls -l /sdcard/Download","timeout_ms":10000}' http://127.0.0.1:8080/api/v1/shell
+
+# 需要 security.allow_power_commands=true
+curl -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"mode":"recovery"}' http://127.0.0.1:8080/api/v1/device/reboot
+curl -H 'X-API-Key: <t>' -X POST http://127.0.0.1:8080/api/v1/device/shutdown
+```
+
+shell 输出有上限（`security.shell_max_output_bytes`，默认 256 KB）并会报告是否被截断；每次调用都写进日志（`shell: cmd=... code=...`）。默认关闭是有意的：这个进程是 root。
+
+### 配置
+
+```sh
+curl -H 'X-API-Key: <t>' http://127.0.0.1:8080/api/v1/config           # 读（token 打码）
+curl -H 'X-API-Key: <t>' -X PUT -H 'Content-Type: application/json' \
+  -d '{"listen":"192.168.5.29:8080","security":{"allow_non_loopback_listen":true}}' \
+  http://127.0.0.1:8080/api/v1/config
+```
+
+- 打码的 token（`abcd…wxyz`）不会写回文件，所以「读出来 → 改一个无关字段 → 写回去」不会把你的 token 弄丢。
+- 把 `listen` 改成非回环地址而 `allow_non_loopback_listen` 仍是 `false` 会被 400 直接拒绝。
+- `listen` / `log_dir` / `log_max_bytes` 改动需要重启进程（响应里 `restart_needed: true`；WebUI 与 `action.sh` 都有重启入口）。其余字段立即生效。
+- 配置文件本体在手机上是 `/data/adb/phoneserver/config.json`（0600），可以直接编辑——但注意「先关服务再改」：进程启动时读一次，运行中改文件不会即时生效。
+
+### 历史数据与数据质量
+
+本地 SQLite（`/data/adb/phoneserver/history.db`）保存遥测时间序列。设计目标是**每个数字都能被信任、能被正确解读、长时间跨度查询不失真**。
+
+采样是分级的：`history.interval_seconds`（默认 10 秒）写全部标量列；`history.full_seconds`（默认 60 秒）额外写一份完整文档（含全部温区、接口、进程列表）到快照表。廉价 tick 量不到的列**写 NULL 而不是 0**，读取时按需 carry forward（响应里 `carried_columns` 会说明）。
+
+每一行都带可信度元数据：
+
+| 列 | 含义 |
+|---|---|
+| `tick_gap_ms` | 与上一行的真实间隔（不是配置值），用于识别漏洞 |
+| `mono_ms` | 单调时钟（elapsedRealtime），墙钟被改也能正确排序 |
+| `tz_offset_min` | 采样时的时区偏移 |
+| `measured_cols` / `absent_cols` / `rejected_cols` | 这一行真的测到 / 缺 / 被判废的列数 |
+| `flags` | 位标记：廉价 tick、超出预期的间隔、检测到重启、值来自上一轮、墙钟跳变 |
+| `source_version` | 写这一行的服务版本 |
+
+取值会做合法性校验（温度、百分比、RSSI 等有范围；`net_rx_bytes`、`uptime`、充电计数等单调计数器不得倒退）。越界值**置 NULL 并计入 rejected**，而不是污染以后所有的统计；检测到重启（`uptime` 倒退）会打 `FLAG_BOOT_RESET` 并重置比较基线。同一秒的重复行会被去重（`ts` 上有唯一约束）。
+
+```sh
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history?metrics=battery_temp_c,cpu_usage_pct&since=-6h&limit=360'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history?metrics=battery_temp_c&since=-30d&bucket=1h'   # 分桶聚合，长跨度不失真
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/metrics'          # 可查询的指标清单
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/stats'            # 库大小/行数/增长速度/功耗估算
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/quality?since=-24h'   # 数据质量报告
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/gaps?since=-24h'      # 采样空洞
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/snapshot?ts=1792598000'
+curl -H 'X-API-Key: <t>' 'http://127.0.0.1:8080/api/v1/history/logs?since=-1h&grep=history&limit=50'
+```
+
+- **不带 `bucket`** 时返回原始行（受 `limit` 约束）。
+- **带 `bucket=10m|1h|1d`** 时在 SQL 内做分桶聚合，每桶每指标给出 `n / avg / min / max / last`，`limit` 作用于**桶数**而不是原始行数——所以「30 天」这种查询拿到的是一份诚实的聚合，不是被截断的开头一段。响应里会声明 `aggregation` 与参与聚合的 `source_rows`。
+- 保留策略：原始样本 `history.retention_days`（默认 30 天）、快照 `history.snapshot_retention_days`（默认 3 天）、日志 `history.log_retention_days`（默认 7 天）、库总量上限 `history.max_db_mb`（默认 512）。删除原始样本**之前**会先把整小时 rolled up 到 `rollup_hourly` 表（`history.rollup_enabled`），所以原始数据过期后长期趋势仍然是真实测量值而不是猜测。
+- `/api/v1/history/quality` 是读数据质量的地方：覆盖区间与覆盖率、每列 NULL 比例、被判废计数、flags 分布、最长的采样空洞、重复行数、库大小与每天增长估算。指标看着不对时先看它，再决定怪设备还是怪采样。
+
+---
+
+## MCP（给 AI agent 用）
+
+两种传输，工具覆盖上面全部能力。
+
+**stdio**（本地 agent 的标准接法）：
+
+```sh
+# 在电脑上跑（API 需要已开局域网访问）
+phoneserver -mcp -config /path/to/config.json -mcp-url http://192.168.5.29:8080
+
+# 或者直接在手机里跑（配合 adb / ssh）
+adb shell '/data/adb/modules/phoneserver/bin/phoneserver -mcp -config /data/adb/phoneserver/config.json'
+```
+
+Claude Code / Codex CLI / 其它 MCP 客户端配置（`command` + `args` 形式）：
 
 ```json
 {
-  "device_id": "25053RT47C-9f3c21ab",
-  "seq": 42,
-  "collected_at": "2026-10-21T12:20:08+08:00",
-  "payload": { "device": {}, "battery": {}, "cpu": {}, "...": {} }
+  "mcpServers": {
+    "phone": {
+      "command": "phoneserver",
+      "args": ["-mcp", "-config", "/path/to/config.json", "-mcp-url", "http://192.168.5.29:8080"]
+    }
+  }
 }
 ```
 
-请求头：`Content-Type: application/json`、`X-Device-Id`、`X-Seq`、`User-Agent: phoneserver/<版本>`，配了 bearer 就带 `Authorization: Bearer <...>`。非 2xx 会按 `retries` 次以 1s/2s/4s 退避重试，结果永远能在 `GET /api/v1/push` 查到。**失败的推送不会排队**——需要完整历史就轮询拉取。
+**HTTP**（常驻服务自带，`mcp.http=true` 时可用）：
 
-最小接收端（三行 Python）：
-
-```python
-import http.server, json
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        print(body["device_id"], body["seq"], body["payload"]["battery"]["capacity_percent"])
-        self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
-http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
+```sh
+curl -s -X POST http://127.0.0.1:8080/mcp \
+  -H 'X-API-Key: <t>' -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-## 本地历史（SQLite）
+工具按能力分组（遥测 / 截图 / 画面信息 / UI 与输入 / 应用 / 设备控制 / 通知与消息 / 相机麦克风 / 文件与 WebDAV / 桥与配置 / 历史 / shell 与电源）。要点：
 
-服务默认把数据写进手机本地的 SQLite 库，**不需要云端也能回看历史**。
+- 图片类工具（`phone_screenshot`、`phone_camera_photo`）返回 MCP 的 image 内容块；录音返回 audio 块。
+- 串流不能塞进 `tools/call`（长连接），所以只提供「取串流信息」的工具，并在描述里给出 URL 与帧协议，让 agent 自己决定怎么消费。
+- `mcp.read_only=true` 时只暴露只读工具，写工具在 `tools/list` 里不出现、被调用时也会拒绝并说明。
+- 危险工具（`phone_shell` / `phone_reboot`）的描述里写明需要哪个配置开关，没开就是 403。
 
-    table        内容                                           默认保留
-    samples      每个周期的标量指标（电量/温度/CPU/内存/网络速率…共 65 列）  30 天
-    snapshots    完整的 /api/v1/all 文档，gzip 压缩后存 BLOB            3 天
-    logs         日志行（实时镜像；首次启动还会回填已有的日志文件）          7 天
+---
 
-库文件是 `/data/adb/phoneserver/history.db`，与配置、日志同目录——**刻意放在模块目录之外**，升级模块不会丢历史。
+## WebUI
 
-驱动用 `modernc.org/sqlite`，即**纯 Go 实现的 SQLite**，不是常见的 mattn/go-sqlite3。这是被构建方式逼出来的选择：二进制必须无 CGO、静态链接才能在 Android 上 exec（见下文构建一节），而 mattn 需要 CGO + NDK。真机已验证：WAL 在 f2fs 上可用、跨进程持久、文件头是标准的 `SQLite format 3`，可直接用任何 SQLite 客户端打开（`sqlite3 history.db`，或 Python 的 `sqlite3` 模块）。
+两个界面，同一套后端：
 
-    # 最近 6 小时的电池温度与 CPU 占用，带 min/avg/max
-    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history?metrics=battery_temp_c,cpu_usage_pct&since=-6h&stats=1'
-    # since/until 可以是 -30m / -6h / -7d 这类相对写法，也可以是 unix 秒或 RFC3339
-    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/logs?since=-24h&grep=error&limit=50'
-    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/snapshot?section=battery'
-    curl -X POST -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/prune'
+1. **管理器 WebUI**（KernelSU/SukiSU 里打开模块卡片，按「WebUI」）：多页面界面，通过 `window.ksu` 桥调用模块内的 `webui.sh`，因此**不需要局域网访问、不需要 token 输入**——它是本机 UI。包含概览、实时画面、操作控制、应用、消息与通知、相机与麦克风、文件与 WebDAV、历史数据、接口与 MCP、配置、日志。
+2. **浏览器界面** `http://<host>:<port>/ui/`：同一份构建产物，由守护进程直接提供静态文件。此时没有 `window.ksu`，页面切到「直连 API」模式：填一次 API 基址与 token（存 localStorage），之后直接 `fetch /api/v1/*`。
 
-`points` 是 `[ts, 指标1, 指标2, ...]`，时间戳在前、由旧到新，便于直接画图；`columns` 给出列名对应关系。
+实时画面页用浏览器的 **WebCodecs** 解码 H.264（Chromium 94+；这台设备的 WebView 是 143，浏览器更没问题），WebCodecs 不可用时自动降级到 mjpeg 端点。画面上点按/滑动会换算成真实坐标调用 `/api/v1/input/*`，所以这就是一个自制的 scrcpy。
 
-`/api/v1/history/stats` 里的 `timing` 把**一个采样周期拆成三段**（最近一次 + 均值）：间隔、采集、写库。实机稳态是「间隔 9.5 秒 · 采集 278ms · 写库 2ms」。
+配置页覆盖 `config.json` 的每一个字段，其中「允许局域网访问」开关旁边有醒目警告；改 `listen` 后会提示重启并提供一键重启。
 
-> 注意：**每次重启后的前几个周期会明显变慢（20–30 秒）**。原因是 TTL 缓存是冷的，第一份快照要现跑 `getprop`、`pm list packages`、`dumpsys`。等它预热完就回到配置的间隔。所以别在刚重启后立刻采样就断定"节奏不对"——先看 `timing.avg_gap_ms`。
+WebUI 的源码在 `webui/`（Vite + Preact + TypeScript + Tailwind v4），构建产物提交在 `module/webroot/`；`./build.sh` 在有 `webui/node_modules` 时重新构建，否则直接用仓库里已构建的产物——**手机端永远不需要 node**。
 
-### 耗电与磁盘：实测，不是估算
+---
 
-结论先说：**服务挂着本身不耗电，耗电只跟"采集了多少次"成正比。**
+## 已知限制
 
-    闲置 30 秒                          进程 CPU 增量 0 ticks（完全睡着）
-    一次完整采集（/api/v1/all）           约 146 ms 进程 CPU 时间（含 getprop / cmd wifi / dumpsys 子进程）
-    每次采集的墙钟耗时                    约 250–300 ms
-    按默认每 10 秒一次                    8640 次/天 ≈ 1261 秒 CPU/天 ≈ 单核 1.46%
-    对照：WebUI 打开时（3 秒轮询）         单核约 4.9%
+每一条都是实测结论，不是推测：
 
-    磁盘（1.3.1 默认设置下实测）
-    总增长        实测 13.5 MB/天（1.3.0 之前是 66 MB/天）
-    快照 table    约 22.6 KB 原始 → gzip9 约 4.5 KB，每分钟一份 ≈ 6.4 MB/天 × 3 天
-    样本 table    每 10 秒一行，约 2.5 MB/天 × 30 天
-    日志 table    随访问量而定（每行 62 B 左右 + 哈希索引）
-    WAL           上限 1 MB（wal_autocheckpoint=256）
-    硬上限        512 MB（超过就按"最老的快照优先"逐出，永远不会把手机塞满）
-    稳态占用      约 130 MB（快照 19 + 样本 75 + 日志若干）
+- **截不到受保护窗口**：`FLAG_SECURE` 的界面（银行、部分聊天应用）截出来是黑帧。
+- **锁屏时 UI 自动化基本失效**：`uiautomator dump` 只有 keyguard 节点；先解锁再自动化，`ui/current` 会告诉你当前是不是这个状态。
+- **`input text` 只能 ASCII**：中文/emoji 必须走剪贴板 + `KEYCODE_PASTE`（需要 Termux:API 桥）。
+- **实时画面要求屏幕处于有效显示状态**：熄屏时 `screenrecord` 报 `INVALID_LAYER_STACK`，需要先唤醒（服务默认会做）。
+- **相机/麦克风依赖 Termux:API**：没装或权限没给就是 503；相机还要求该 uid 前台（服务会自动拉起 Termux 活动页，可能点亮屏幕）。
+- **写 `/system`、`/system_ext`、`/product`、`/vendor` 不可能**：这些分区是只读 erofs 且不是独立挂载点，系统级修改只能通过模块挂载。
+- **`/sdcard` 在锁屏状态下不可访问**（FUSE 视图解锁后才存在），涉及它的文件操作要等解锁。
+- **没有 SIM 卡就没有短信/通话**：本机 `gsm.sim.state` 是空的，`source=sms|calls` 返回 0 行并说明原因。
+- **包列表没有应用名**（缺 `aapt`），只有包名与路径。
+- **WebDAV 锁不强制**（见上文），多客户端并发写同一路径要自己协调。
+- **`POST /api/v1/shell` 与电源端点是 root 级能力**，默认关闭；打开前请确认这台手机只在你自己的网络里。
 
-### 存储占用：做过什么、量到什么
+---
 
-先看清楚钱花在哪（真机库 dbstat 按表/索引统计）：
+## 常见故障排查
 
-    快照 table              68.8%   ← 大头
-    日志 table + 唯一索引    23.2%   ← 索引几乎和正文一样大
-    样本 table               5.0%
-
-据此做了四件事，每项都在真机上量过：
-
-| 改动 | 效果 | 代价 |
-|---|---|---|
-| 快照 gzip 等级 1 → 9（BestSpeed → BestCompression） | 平均 **5,244 B → 4,465 B（−15.1%）**，43.2 → **36.8 MB/天** | 压缩耗时 0.24 → 0.61 ms/次（10 秒一次，可忽略） |
-| 日志去重索引 (ts_ms, line) → (ts_ms, line_hash) | 索引每行 **90.7 B → 27.3 B（−70%）** | 无（语义不变，插入时算一个 64 位 FNV） |
-| wal_autocheckpoint=256 | WAL 常驻从 ~2.5 MB 降到上限 1 MB | 无明显代价 |
-| auto_vacuum=INCREMENTAL + prune 后 incremental_vacuum | 删除后**页面真的还给系统**，库大小不再停在历史最高水位 | 切换时一次 VACUUM（库小，毫秒级） |
-| **采集频次分级**：完整文档默认 60 秒一次（标量指标仍 10 秒） | 磁盘 **36.8 → 6.4 MB/天**；CPU 1261 → 约 270 秒/天 | 那 22.6 KB 的完整文档（热区全表、网络全表…）从 10 秒分辨率降到 1 分钟 |
-| **廉价行不写测不到的列**（写 NULL，不写 0） | 每行少 14 个值 | 需要读时向前取值，见下 |
-
-合计：**66 MB/天 → 实测 13.5 MB/天**。
-
-关于"按字段去重"：量过，**收益很小**。快照里完全不变的段（device/wifi/gpu/display/packages）占原始文本的 9.8%，但 gzip 之后只占 17.7% 的压缩体积——**gzip 已经在做"不变的部分几乎不花空间"这件事**。所以继续抠字段意义不大。
-
-**真正的杠杆是频次**，见下一节。
-
-### 采集频次分级：重要的 10 秒，不重要的 60 秒
-
-配置里有两个旋钮：`interval_seconds`（采样周期，**默认 10 秒**）和 `full_seconds`（采集**完整文档**的周期，**默认 60 秒**）。
-
-原因是量出来的：完整文档 22.6 KB（热区全表、网络全表、进程列表…），标量指标只有一行 65 个数字。前者每 10 秒一次就是全部磁盘开销，而它恰好是"没那么必要那么密"的那部分。
-
-    每 10 秒（廉价 tick）：65 个标量指标 —— 电量/温度/CPU/内存/速率/屏幕/充电…
-    每分钟（完整 tick）：完整文档入库，并补齐廉价 tick 测不到的列
-
-    电：每天 CPU 1261 秒 → 约 270 秒（单核 1.46% → 0.31%）
-    盘：快照 36.8 MB/天 → 6.4 MB/天
-
-库里每行都有 `full` 列标明这一行是完整采集还是廉价采集，绝不含糊。想让**每一 tick 都是完整文档**（回到"全部数据 10 秒一次"），把两个值设成一样即可：
-
-    { "history": { "interval_seconds": 10, "full_seconds": 10 } }
-
-### 廉价 tick 测不到的列：写 NULL，不写 0
-
-廉价 tick 不 spawn `cmd wifi` / `pm list packages` 这些子进程，所以有 14 列它根本测不到：`wifi_ssid`、`wifi_connected`、`wifi_rssi_dbm`、`wifi_signal_pct`、`wifi_link_mbps`、`wifi_freq_mhz`、`wifi_channel`、`pkg_total`、`pkg_user`、`pkg_system`、`pkg_disabled`、`proc_count`、`battery_time_to_full_s`、`battery_time_to_empty_s`。
-
-这些列在这些行里存 **NULL**——不是 0。写 0 等于编数据（"Wi-Fi 信号 0%"、"装了 0 个应用"）。读取时 API **向前取值**：拿该列最近一次真实测到的值填上，让曲线没有断点，同时在响应里明说是哪几列：
-
-    "carried_columns": ["pkg_total", "proc_count", "wifi_signal_pct"]
-
-`stats` 里的 min/avg/max 只统计**真实测量到**的值，被补上的点不参与——所以那几列的统计量是干净的。
-
-    { "history": { "interval_seconds": 10, "full_seconds": 60 } }
-
-## 截图
-
-```bash
-curl -H "X-Api-Key: $TOKEN" -o shot.webp http://192.168.5.29:8080/api/v1/screenshot
-curl -H "X-Api-Key: $TOKEN" -o small.webp 'http://192.168.5.29:8080/api/v1/screenshot?quality=60&scale=0.5'
-curl -H "X-Api-Key: $TOKEN" 'http://192.168.5.29:8080/api/v1/screenshot?meta=1'   # 只看元数据
-```
-
-| 参数 | 说明 |
+| 症状 | 原因与处理 |
 |---|---|
-| `format` | `webp`（默认）/ `jpeg` / `png` |
-| `quality` | 1–100，默认 80（`png` 忽略） |
-| `scale` | 0.1–1，默认 1（原始尺寸） |
-| `display` | 指定 display id（默认主屏） |
-| `meta=1` | 返回 JSON 元数据，不返回图片 |
-| `base64=1` | 返回 JSON 并把图片内联为 base64（管理器 WebUI 用这个） |
-| `download=1` | 让浏览器直接另存 |
+| 电脑连不上 | 默认只监听回环。打开 `security.allow_non_loopback_listen` 并把 `listen` 改成手机局域网 IP，然后重启服务 |
+| 所有请求 401 | 缺 token。`grep api_token /data/adb/phoneserver/config.json`，或按 `action.sh` 按钮 |
+| 相机/麦克风 503 | 桥不可用。`POST /api/v1/bridge/fix`，再 `GET /api/v1/bridge/status` 看 `missing_tools` 与 `permissions` |
+| 相机 502 且提到 background | uid 不在前台。`bridge.foreground_for_camera` 打开，或先 `bridge/fix` |
+| 麦克风只有几百字节 | uid 没到前台服务状态。`bridge.keep_awake_for_mic` 打开（默认），或先 `bridge/fix` |
+| 画面流立刻断开 | 屏幕熄屏。带 `?wake=1`，或打开 `stream.wake_display` |
+| 画面卡顿/流量大 | 降 `bitrate`（如 1500000）或 `size`（如 540x1170），或改用 mjpeg |
+| 截图全黑 | 目标窗口是 `FLAG_SECURE`，平台行为 |
+| `ui/dump` 没文本 | 锁屏或熄屏。先 `POST /api/v1/control/screen {"action":"on"}` 并解锁 |
+| WebDAV 挂不上 | 用 Basic（用户名任意、密码 token）；Windows 需要放开 http 基本认证；确认 `/dav/<share>/` 结尾带斜杠 |
+| 历史里有空洞 | 看 `/api/v1/history/gaps` 与 `/history/quality`；服务重启/关机期间本来就没有样本 |
+| 改了配置不生效 | `listen`/`log_dir`/`log_max_bytes` 需要重启；直接改配置文件也要重启 |
+| 端口被占 | `adb shell 'ss -lntp \| grep 8080'`，换个端口并重启 |
 
-**只在请求时产生画面。** 没有后台截图，不写入历史数据库，也不参与云端推送——推送载荷是遥测文档，里面没有任何图片字段（`push.go` 里 grep 不到 screenshot/image/base64）。响应也会明说：响应头 `X-Screenshot-Stored: false` / `X-Screenshot-Pushed: false`，JSON 里是 `"stored": false` / `"pushed": false`。
+---
 
-实机实测（1280×2772，锁屏+壁纸这种有内容的画面）：
-
-| 请求 | 输出 | 相对原始 PNG | 采集 | 编码 |
-|---|---|---|---|---|
-| `quality=80`（默认） | **166 KB** | 3.5% | ~350 ms | ~340 ms |
-| `quality=70` | 93 KB | 1.9% | ~350 ms | ~350 ms |
-| `quality=60` | 67 KB | 1.4% | ~350 ms | ~300 ms |
-| `quality=60&scale=0.5` | 12 KB | 0.4%（640×1386） | ~350 ms | ~90 ms |
-| `format=jpeg&quality=85` | 438 KB | 9.1% | ~350 ms | ~160 ms |
-| `format=png` | 4.8 MB | 100%（原样透传） | ~370 ms | 0 |
-
-- 编码器是**纯 Go 的 WebP**（`github.com/KarpelesLab/gowebp`，无 CGO——这个二进制必须静态无 CGO 才能在 Android 上 exec）。无损 WebP 对截图没有意义（只比 PNG 略小、还慢 5 倍），所以默认是有损 VP8。同质量档下它比成熟的 libwebp 大约 40%，但相对 PNG 已经是 3.5%；比 JPEG 小 2.6 倍。
-- **刚从熄屏/息屏显示唤醒时**第一次采集可能要 2 秒多（显示要上电），之后约 350 ms。服务端 20 秒超时；同一时刻只允许一个采集，第二个请求得到 **429** 和 `Retry-After`。
-- **受保护的画面会全黑**：标了 `FLAG_SECURE` 的窗口（银行、部分视频、密码输入界面）由 SurfaceFlinger 直接返回黑帧——那是系统在保护内容，本模块不绕过。
-- 每次请求都会进访问日志，和其它端点一样。
-
-## 管理器 WebUI
-
-在 KernelSU / SukiSU 管理器里打开模块卡片 → **WebUI**：实时指标 + 服务控制（重启/停止/启动）、切换监听端口、编辑推送设置、立即推送、查看/复制令牌、看日志。
-
-页面本身只是渲染层：每个按钮都通过 KernelSU 的 `window.ksu.exec(cmd, '{}', callbackName)` 桥执行模块里的 `webui.sh` 子命令。所以同一套后端也能在命令行用：
+## 运维
 
 ```sh
-sh /data/adb/modules/phoneserver/webui.sh snapshot          # {status:{...},data:{...}}，界面刷新只调这一次
-sh .../webui.sh status | data battery | logs 60 | token
-sh .../webui.sh restart | start | stop
-sh .../webui.sh set-push <url> <秒> <bearer> <0|1>
-sh .../webui.sh set-port 9090
+DATA=/data/adb/phoneserver
+
+# 状态、地址、token、桥与串流状态（KernelSU/Magisk 的 Action 按钮执行同一脚本）
+adb shell "sh /data/adb/modules/phoneserver/action.sh"
+
+# 日志（每请求一行；4 MB × 3 轮转）
+adb shell "tail -n 50 $DATA/logs/phoneserver.log"
+adb shell "tail -n 50 $DATA/logs/stdout.log"
+
+# 重启（watchdog 会在 10 秒内把它拉回来）
+adb shell 'pkill -f bin/phoneserver'
+
+# 停止（连 watchdog 一起停）
+adb shell "kill \$(cat $DATA/watchdog.pid); pkill -f bin/phoneserver"
+
+# 备份配置与历史
+adb pull $DATA/config.json
+adb pull $DATA/history.db
 ```
 
-`restart` / `start` / `set-port` **不会假报成功**：它们会轮询 `/api/v1/health` 直到服务真的在新状态上应答，否则返回 `ok:false` 和原因。
+- 进程由 `watchdog.sh` 守护：被杀后 10 秒内自动重启。
+- 配置、日志、历史库都在 `/data/adb/phoneserver/`，**不在模块目录里**，所以升级/重装模块不会丢 token 和数据。
+- 轮换 token：`PUT /api/v1/config` 写入新的 `api_token` 即可（或直接改 config.json 后重启）。
+- 日志会被镜像进历史库（`/api/v1/history/logs` 可查历史日志），因此日志也能按时间线回溯。
 
-> 注意：`webroot/` 的权限和 SELinux 上下文由 KernelSU 在安装时设置，**不要自己 chmod**。
+---
 
-## 构建
+## 开发者
 
 ```sh
-./build.sh          # 产出 phoneserver-arm64 与 phoneserver-module.zip
+./build.sh          # 交叉编译静态 arm64 → go test → 构建 WebUI → 打包 phoneserver-module.zip
 ```
 
-需要 Go。除纯 Go 的 SQLite 驱动（`modernc.org/sqlite`）外没有其他依赖；那一个依赖需要联网拉取一次（国内建议 `export GOPROXY=https://goproxy.cn,direct`），之后走本地模块缓存，编译本身仍是离线交叉编译。
+- 守护进程是 `CGO_ENABLED=0` 的纯静态 Go 二进制（必须如此：Android 的 loader 是 `/system/bin/linker64`，任何带 `PT_INTERP` 的 PIE 都会以「No such file or directory」失败退出）。`build.sh` 会断言二进制 **0 个 INTERP 段**。
+- 依赖只有三个，且都是纯 Go：`modernc.org/sqlite`（本地历史）、`golang.org/x/image`、`github.com/KarpelesLab/gowebp`（webp 编解码）。所以交叉编译不需要联网。
+- 测试：`go test ./...`（`build.sh` 把测试当门禁，红了不会打包）。
+- 真机端到端自检：`scripts/smoke.sh <base-url> <token> [--with-input] [--with-camera]`，逐条打印 PASS/FAIL（含「该被拒绝的端点是否真的拒绝了」）。
+- 仓库：**https://github.com/Kailoinf/phoneserver**（源码为准，release 里是安装包）。WebUI 源码在 `webui/`，构建产物在 `module/webroot/`。
+- 发布：`gh release create vX.Y.Z phoneserver-module.zip --title ... --notes ...`；版本号要同时改 `module/module.prop` 与 `main.go` 里的 `version` 常量（二进制会自报版本，`/api/v1/health` 可以核）。
 
-**绝对不要用 `-buildmode=pie`。** Go 在 linux/arm64 上的 PIE 产物带 `PT_INTERP=/lib/ld-linux-aarch64.so.1`，而 Android 的加载器是 `/system/bin/linker64`，该路径不存在 → 内核拒绝 exec，报的是很有迷惑性的 `No such file or directory`（其实是解释器缺失）并返回 126。必须是静态 `ET_EXEC`。`build.sh` 里有这个断言（`readelf -l … | grep -c INTERP` 必须为 0）。
-
-另外：Go 里要 `import _ "time/tzdata"`，否则 Android 上没有 zoneinfo 目录，`time.LoadLocation` 全部失败、所有时间戳会静默变成 UTC。
-
-## 目录结构
-
-```
-.
-├── build.sh              # 交叉编译 + 打包成可安装模块
-├── main.go               # HTTP 服务、路由、鉴权、配置
-├── collect.go            # 所有采集器（sysfs / proc / getprop / dumpsys）
-├── store.go              # SQLite 层：建表、写入、查询、保留策略、日志镜像
-├── history.go            # 采样循环（完整 tick / 廉价 tick）、成本估算、日志回填
-├── historyapi.go         # /api/v1/history/* 的处理函数与时间参数解析
-├── push.go               # 云端推送与重试
-└── dashboard.go          # 浏览器仪表盘（内嵌 HTML，含历史曲线面板）
-└── module/               # 模块骨架
-    ├── module.prop       # 模块元数据（管理器里显示的名称/版本/作者）
-    ├── customize.sh      # 安装时执行
-    ├── service.sh        # 开机入口：等系统起完 → 拉起看门狗
-    ├── watchdog.sh       # 常驻重启循环
-    ├── action.sh         # 管理器 Action 按钮显示的内容
-    ├── uninstall.sh      # 卸载时停服务
-    ├── webui.sh          # WebUI 后端（也能在命令行直接用）
-    ├── webroot/index.html# 管理器里的界面
-    └── META-INF/…        # Magisk 安装引导文件
-```
-
-## 配置项（`/data/adb/phoneserver/config.json`）
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `listen` | `0.0.0.0:8080` | 监听地址，改后需重启服务 |
-| `api_token` | 随机生成 | 留空则**不鉴权**（任何能路由到该端口的人都能读） |
-| `device_id` | 由机型+序列号推导 | 推送时带上的设备标识，可自定义 |
-| `log_requests` | `true` | 每个 HTTP 请求记一行日志 |
-| `*_ttl_seconds` | 见文件 | 昂贵数据源的缓存时长（getprop/wifi/dumpsys/包列表/进程） |
-| `storage_mounts` | `/data`,`/`,`/system`,`/storage/emulated/0` | 要统计的挂载点 |
-| `push.*` | 关闭 | 接收地址、间隔、Bearer、超时、重试次数、额外请求头 |
-| `history.enabled` | `true` | 是否启用本地 SQLite 历史 |
-| `history.db_path` | `/data/adb/phoneserver/history.db` | 库文件位置（改后需重启） |
-| `history.interval_seconds` | `10` | 采样周期 |
-| `history.full_seconds` | `10` | 采集完整文档的周期；大于采样周期时中间的 tick 走廉价路径 |
-| `history.retention_days` | `30` | 样本保留天数 |
-| `history.snapshot_retention_days` | `3` | 快照保留天数 |
-| `history.log_retention_days` | `7` | 日志保留天数 |
-| `history.max_db_mb` | `512` | 硬上限，超过就逐出最老的快照 |
-| `history.backfill_logs` | `true` | 首次启动是否把已有日志文件回填进库 |
-
-## 安全说明
-
-- 服务**以 root 运行**并监听所有网络接口。务必保留 `api_token`；清空它等于把设备状态公开给能访问该端口的人。
-- **没有"任意文件读取"接口**，这是刻意的：一个以 root 运行、又开在网络端口上的服务如果带这个功能，等于远程文件泄露。只暴露命名好的、经过筛选的资源。再比如端口映射/公网暴露，请自己在服务器侧终止 TLS，推送地址用 `https://`。
-- `GET /api/v1/config` 会脱敏令牌；`PUT` 拒绝把脱敏占位符写回真令牌，所以"读出来改一改再写回去"不会毁掉凭证。
-
-## 已验证环境
-
-在 REDMI Turbo 4 Pro / POCO F7（`onyx`，SM8735）+ HyperOS 3（Android 16）+ SukiSU Ultra v4.2.1 上实测：
-
-开机自启与看门狗自愈（kill 掉 10 秒内自动拉起）、17 个读端点全部 200、管理器 WebUI 正常渲染、网页仪表盘正常渲染、带 Bearer 的推送到达真实接收端并重试正确、端口切换后自愈、`GET /config → PUT 改动 → 回读` 不丢令牌、SELinux 强制模式下 root 读取正常。
-
-本地历史另外单独验证过：SQLite 在设备上创建/写入/跨进程持久化正常（`PRAGMA integrity_check` = ok，`journal_mode` = wal）、采样节奏实测为稳定的 10.0 秒、旧日志文件被正确回填进库且时间戳按本机时区解析、六个 `/api/v1/history/*` 端点全部 200 且返回真实曲线、保留策略与 checkpoint 工作正常。
-
-## 许可
-
-MIT © 2026 Kairo
+许可证：MIT。

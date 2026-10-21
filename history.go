@@ -42,6 +42,16 @@ type HistoryConfig struct {
 	MaxDBMB               int  `json:"max_db_mb"`
 	BackfillLogs          bool `json:"backfill_logs"`
 	PruneEverySeconds     int  `json:"prune_every_seconds"`
+	// RollupEnabled folds each complete hour into rollup_hourly before the raw
+	// samples are pruned, so "what did last month look like" still has an
+	// answer after retention deletes the raw rows. Default true; a config file
+	// written before this field existed also lands on true, because the loader
+	// unmarshals into the defaults rather than into a zero value.
+	RollupEnabled bool `json:"rollup_enabled"`
+	// RollupRetentionDays applies to rollup_hourly only. 0 = keep forever: the
+	// table is ~1/3600th of the raw samples (one row per hour and metric), and
+	// above the raw retention it is the only remaining evidence.
+	RollupRetentionDays int `json:"rollup_retention_days"`
 }
 
 func defaultHistoryConfig() HistoryConfig {
@@ -61,6 +71,8 @@ func defaultHistoryConfig() HistoryConfig {
 		MaxDBMB:               512,
 		BackfillLogs:          true,
 		PruneEverySeconds:     300,
+		RollupEnabled:         true,
+		RollupRetentionDays:   0,
 	}
 }
 

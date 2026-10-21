@@ -40,7 +40,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // ---------- flattened sample row ----------
 
@@ -121,6 +121,29 @@ type Sample struct {
 	Full               int     `json:"full"` // 1 when built from the full snapshot
 
 	CollectMS int64 `json:"collect_ms"` // wall time the collection cost
+
+	// ---- schema v3: metadata that makes a row interpretable on its own ----
+	//
+	// These describe *how* the row was produced, not what was measured, so a
+	// reader can tell a real plateau from a hole and a real reading from a
+	// value that failed validation. Rows written before v3 hold NULL here,
+	// which means "unknown" — never 0, which would read as a measurement.
+	//
+	// TickGapMS is the interval since the previous tick measured on the
+	// monotonic clock (wall time can be stepped by NTP). MonoMS is that
+	// monotonic clock itself, TzOffsetMin the local UTC offset in minutes,
+	// MeasuredCols how many metric columns this row really carries,
+	// AbsentCols/RejectedCols the column names stored NULL and rejected (JSON
+	// arrays), Flags the bitmask documented in historyquality.go and
+	// SourceVersion the build that wrote the row.
+	TickGapMS     int64  `json:"tick_gap_ms"`
+	MonoMS        int64  `json:"mono_ms"`
+	TzOffsetMin   int64  `json:"tz_offset_min"`
+	MeasuredCols  int64  `json:"measured_cols"`
+	AbsentCols    string `json:"absent_cols"`
+	RejectedCols  string `json:"rejected_cols"`
+	Flags         int64  `json:"flags"`
+	SourceVersion string `json:"source_version"`
 }
 
 // sampleColumns mirrors the Sample struct field order exactly.
@@ -143,19 +166,23 @@ var sampleColumns = []string{
 	"uptime_s", "proc_count", "selinux_enforcing",
 	"pkg_total", "pkg_user", "pkg_system", "pkg_disabled",
 	"full", "collect_ms",
+	"tick_gap_ms", "mono_ms", "tz_offset_min", "measured_cols",
+	"absent_cols", "rejected_cols", "flags", "source_version",
 }
 
 // values mirrors sampleColumns exactly — keep the two in lockstep.
-// markAbsent flags columns this tick did not measure. ts and full never go
-// missing: they describe the row itself.
+// markAbsent flags columns this tick did not measure. ts, full and the schema
+// v3 quality columns never go missing: they describe the row itself, so NULLing
+// them would delete the very metadata that explains the NULLs.
 func (s *Sample) markAbsent(cols ...string) {
 	if s.absent == nil {
 		s.absent = make(map[string]bool, len(cols))
 	}
 	for _, c := range cols {
-		if c != "ts" && c != "full" {
-			s.absent[c] = true
+		if c == "ts" || c == "full" || sampleQualityColumnSet[c] {
+			continue
 		}
+		s.absent[c] = true
 	}
 }
 
@@ -188,6 +215,8 @@ func (s Sample) values() []any {
 		s.UptimeS, s.ProcCount, s.SelinuxEnforcing,
 		s.PkgTotal, s.PkgUser, s.PkgSystem, s.PkgDisabled,
 		s.Full, s.CollectMS,
+		s.TickGapMS, s.MonoMS, s.TzOffsetMin, s.MeasuredCols,
+		s.AbsentCols, s.RejectedCols, s.Flags, s.SourceVersion,
 	}
 	if len(s.absent) > 0 {
 		for i, c := range sampleColumns {
@@ -224,6 +253,11 @@ type Store struct {
 	db   *sql.DB
 	path string
 
+	// warnf is the migrator's logger: openStore fills it in before migrate()
+	// runs so a one-off repair (dropped duplicates) is reported to the operator
+	// instead of happening silently.
+	warnf func(string, ...any)
+
 	mu      sync.Mutex // serialises writers; SQLite wants one writer
 	sink    *logSink
 	stopCh  chan struct{}
@@ -231,6 +265,25 @@ type Store struct {
 
 	lastPrune atomic.Int64
 	pruned    atomic.Int64 // total rows removed
+}
+
+// sampleColumnType maps a sample column to its SQLite type. Kept in one place
+// so the CREATE TABLE for a new database and the ALTER TABLE for an existing
+// one can never disagree about a column's type.
+func sampleColumnType(c string) string {
+	switch {
+	case c == "battery_status", c == "battery_health", c == "wakefulness",
+		c == "hottest_zone", c == "wifi_ssid", c == "cpu_freqs_khz",
+		c == "absent_cols", c == "rejected_cols", c == "source_version":
+		return "TEXT"
+	case c == "tick_gap_ms", c == "mono_ms", c == "tz_offset_min",
+		c == "measured_cols", c == "flags":
+		return "INTEGER"
+	case strings.HasSuffix(c, "_bytes"):
+		return "INTEGER"
+	default:
+		return "REAL"
+	}
 }
 
 func (s *Store) LogSink() io.Writer { return s.sink }
@@ -324,7 +377,10 @@ func openStore(path string, warnf func(string, ...any)) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
-	s := &Store{db: db, path: path, sink: &logSink{ch: make(chan logRow, 8192)}}
+	s := &Store{db: db, path: path, sink: &logSink{ch: make(chan logRow, 8192)}, warnf: warnf,
+		// stopCh must exist before Close() (which closes it) or shutdown panics
+		// with "close of nil channel" — caught by killing the process on device.
+		stopCh: make(chan struct{})}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -345,17 +401,11 @@ func (s *Store) migrate() error {
 		`CREATE TABLE IF NOT EXISTS samples (` + func() string {
 			cols := make([]string, 0, len(sampleColumns))
 			for _, c := range sampleColumns {
-				switch {
-				case c == "ts":
+				if c == "ts" {
 					cols = append(cols, "ts INTEGER PRIMARY KEY")
-				case c == "battery_status", c == "battery_health", c == "wakefulness",
-					c == "hottest_zone", c == "wifi_ssid", c == "cpu_freqs_khz":
-					cols = append(cols, c+" TEXT")
-				case strings.HasSuffix(c, "_bytes"):
-					cols = append(cols, c+" INTEGER")
-				default:
-					cols = append(cols, c+" REAL")
+					continue
 				}
+				cols = append(cols, c+" "+sampleColumnType(c))
 			}
 			return strings.Join(cols, ", ")
 		}() + `)`,
@@ -373,6 +423,17 @@ func (s *Store) migrate() error {
 			line TEXT NOT NULL,
 			line_hash INTEGER NOT NULL DEFAULT 0
 		)`,
+		// rollup_hourly keeps the long-range trend alive after the raw samples
+		// age out. One row per hour and metric; WITHOUT ROWID because the
+		// composite key *is* the row, which halves the index overhead.
+		`CREATE TABLE IF NOT EXISTS rollup_hourly (
+			ts_hour INTEGER NOT NULL,
+			metric TEXT NOT NULL,
+			n INTEGER NOT NULL,
+			avg REAL, min REAL, max REAL, last REAL,
+			PRIMARY KEY (ts_hour, metric)
+		) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_rollup_metric ON rollup_hourly(metric, ts_hour)`,
 		// Deduplicate on a 64-bit fingerprint, not on the text itself: indexing
 		// (ts_ms, line) stores a second copy of every line inside the index
 		// (measured: 241 KB of index for 163 KB of text).
@@ -386,6 +447,49 @@ func (s *Store) migrate() error {
 		}
 	}
 	_ = schemaVersion // keep the version visible next to the migration list
+
+	// --- v2 -> v3: the quality columns -------------------------------------
+	// Added with ALTER TABLE, never by rebuilding the table: a rebuild would
+	// double the file size on the phone's flash and could lose rows if it were
+	// interrupted. Existing rows keep NULL in every new column, which is the
+	// honest value ("this row predates the metadata") and must not be backfilled
+	// with 0, because 0 reads as a measurement: measured_cols=0 would claim the
+	// row has no data at all, and flags=0 would claim no anomaly was seen.
+	// The error for an already-present column is expected on the second and
+	// every later start, which is what makes this idempotent.
+	for _, c := range sampleQualityColumns {
+		if _, err := s.db.Exec(`ALTER TABLE samples ADD COLUMN ` + c + " " + sampleColumnType(c)); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("migrate: add samples.%s: %w", c, err)
+			}
+		}
+	}
+	// Duplicates must be gone before the UNIQUE index can be created, and the
+	// migration has to survive a database written by a build that did not
+	// enforce it.
+	if n, err := s.dedupeSamples(); err != nil {
+		return err
+	} else if n > 0 {
+		total := int64(0)
+		if v, ok := s.metaGet("samples_deduped_total"); ok {
+			fmt.Sscanf(v, "%d", &total)
+		}
+		total += n
+		_ = s.metaSet("samples_deduped_total", fmt.Sprint(total))
+		if s.warnf != nil {
+			s.warnf("history: migrate dropped %d duplicate sample row(s) at the same ts (kept the most complete row); %d dropped in total", n, total)
+		}
+	}
+	// ts uniqueness, stated in the schema instead of trusted to the writer.
+	// When ts is INTEGER PRIMARY KEY SQLite already enforces it (a second insert
+	// replaces the first), but a table written by an older or foreign build may
+	// have had ts as a plain column, where a restart could leave two rows in the
+	// same second. The index also stops ON CONFLICT/REPLACE from silently
+	// creating that state again. It indexes one integer, so it costs ~1% of the
+	// samples table.
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_samples_ts_unique ON samples(ts)`); err != nil {
+		return fmt.Errorf("migrate: unique index on samples.ts: %w", err)
+	}
 
 	// Migrations that SQL cannot express, run every start and cheap when done.
 	// 1. logs.line_hash. Adding the column twice fails harmlessly.
@@ -481,6 +585,88 @@ func firstLine(s string) string {
 		return strings.TrimSpace(s[:i])
 	}
 	return s
+}
+
+// completenessScore is a SQL expression ranking how much of a row is real:
+// each non-NULL metric counts one. It is used to decide which row survives when
+// two rows claim the same second — keeping the fuller one is keeping the truth.
+func completenessScore() string {
+	parts := make([]string, 0, len(sampleColumns))
+	for _, c := range sampleColumns {
+		if c == "ts" {
+			continue
+		}
+		parts = append(parts, "("+c+" IS NOT NULL)")
+	}
+	return strings.Join(parts, " + ")
+}
+
+// dedupeSamples removes rows that share a ts, keeping the most complete one.
+// SQLite's INTEGER PRIMARY KEY already makes that impossible in a table this
+// build created, but a database written by another build may not have had the
+// constraint — and a UNIQUE index cannot be created while duplicates exist.
+// Rows are collected before any DELETE runs: with SetMaxOpenConns(1) a write
+// issued while a cursor is open would wait on itself forever.
+func (s *Store) dedupeSamples() (int64, error) {
+	var groups int64
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM (SELECT ts FROM samples GROUP BY ts HAVING COUNT(*) > 1)`).Scan(&groups); err != nil {
+		return 0, fmt.Errorf("migrate: count duplicate ts: %w", err)
+	}
+	if groups == 0 {
+		return 0, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT rowid, ts FROM samples WHERE ts IN
+			(SELECT ts FROM samples GROUP BY ts HAVING COUNT(*) > 1)
+		 ORDER BY ts ASC, (` + completenessScore() + `) DESC, COALESCE(full,0) DESC, COALESCE(collect_ms,0) DESC`)
+	if err != nil {
+		return 0, fmt.Errorf("migrate: list duplicate rows: %w", err)
+	}
+	var losers []int64
+	lastTs := int64(-1 << 62)
+	it := int64(0)
+	for rows.Next() {
+		var rowid, ts int64
+		if err := rows.Scan(&rowid, &ts); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		// Rows arrive grouped by ts and best-first inside the group, so the
+		// first row of each group is kept and everything after it is a loser.
+		if ts != lastTs {
+			lastTs = ts
+			it = 0
+		}
+		it++
+		if it > 1 {
+			losers = append(losers, rowid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var dropped int64
+	for i := 0; i < len(losers); i += 200 {
+		end := i + 200
+		if end > len(losers) {
+			end = len(losers)
+		}
+		ph := strings.TrimSuffix(strings.Repeat("?,", end-i), ",")
+		args := make([]any, 0, end-i)
+		for _, id := range losers[i:end] {
+			args = append(args, id)
+		}
+		res, err := s.db.Exec(`DELETE FROM samples WHERE rowid IN (`+ph+`)`, args...)
+		if err != nil {
+			return dropped, fmt.Errorf("migrate: delete duplicate rows: %w", err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			dropped += n
+		}
+	}
+	return dropped, nil
 }
 
 func (s *Store) Close() error {
@@ -664,9 +850,12 @@ type PruneResult struct {
 	SamplesDeleted   int64 `json:"samples_deleted"`
 	SnapshotsDeleted int64 `json:"snapshots_deleted"`
 	LogsDeleted      int64 `json:"logs_deleted"`
+	RollupRows       int64 `json:"rollup_rows_upserted"`
+	RollupDeleted    int64 `json:"rollup_hours_deleted"`
 	SizeCapEvicted   int64 `json:"size_cap_evicted"`
 	DBBytesBefore    int64 `json:"db_bytes_before"`
 	DBBytesAfter     int64 `json:"db_bytes_after"`
+	RollupError      string `json:"rollup_error,omitempty"`
 }
 
 func (s *Store) DBFileBytes() int64 {
@@ -700,8 +889,32 @@ func (s *Store) Prune(now time.Time, h HistoryConfig) (PruneResult, error) {
 		n, _ := r.RowsAffected()
 		return n
 	}
+	// Roll up *before* deleting raw samples. Retention deletes samples at the
+	// end of this function; if the hourly aggregate for an hour does not exist
+	// yet, that hour's trend is destroyed forever. Doing it first makes the
+	// order irrelevant to correctness even though the two run in one call.
+	//
+	// rollupHoursLocked, not rollupHours: Prune already holds s.mu, and the
+	// locking version would re-acquire it on the same goroutine and hang the
+	// store forever (the log flusher queues behind it and the sink channel then
+	// fills up). This deadlock was found on device with a goroutine dump.
+	if h.RollupEnabled {
+		n, err := s.rollupHoursLocked(now, h)
+		res.RollupRows = n
+		if err != nil {
+			res.RollupError = err.Error()
+			if s.warnf != nil {
+				s.warnf("history: hourly rollup failed: %v", err)
+			}
+		}
+	}
 	if c := cut(h.RetentionDays); c > 0 {
 		res.SamplesDeleted = exec(`DELETE FROM samples WHERE ts < ?`, c)
+	}
+	if c := cut(h.RollupRetentionDays); c > 0 {
+		// 0 means keep the hourly trend forever: above the raw retention it is
+		// the only remaining evidence, and it is ~1/3600th of the raw volume.
+		res.RollupDeleted = exec(`DELETE FROM rollup_hourly WHERE ts_hour < ?`, c)
 	}
 	if c := cut(h.SnapshotRetentionDays); c > 0 {
 		res.SnapshotsDeleted = exec(`DELETE FROM snapshots WHERE ts < ?`, c)
@@ -1066,6 +1279,439 @@ func (s *Store) SnapshotDoc(ts int64) (map[string]any, int64, error) {
 	return doc, rowTs, nil
 }
 
+// ---------- bucketed aggregation ----------
+
+// defaultMetrics is what /api/v1/history shows when no metric is named.
+var defaultMetrics = []string{"battery_capacity_pct", "battery_temp_c", "cpu_usage_pct", "mem_used_pct", "max_temp_c"}
+
+// resolveMetrics validates a metric list against the whitelist and returns the
+// SELECT column list (with ts first). Shared by the raw and the bucketed query
+// so both reject the same unknown names.
+func resolveMetrics(metrics []string) ([]string, error) {
+	cols := []string{"ts"}
+	seen := map[string]bool{"ts": true}
+	if len(metrics) == 0 {
+		metrics = defaultMetrics
+	}
+	for _, m := range metrics {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		if !metricWhitelist[m] {
+			return nil, fmt.Errorf("unknown metric %q (see GET /api/v1/history/metrics)", m)
+		}
+		seen[m] = true
+		cols = append(cols, m)
+	}
+	return cols, nil
+}
+
+// BucketStat is one metric inside one bucket. The pointers keep "no reading in
+// this bucket" distinguishable from a reading of zero — the whole point of the
+// NULL discipline in the samples table.
+type BucketStat struct {
+	N    int64    `json:"n"`
+	Avg  *float64 `json:"avg"`
+	Min  *float64 `json:"min"`
+	Max  *float64 `json:"max"`
+	Last *float64 `json:"last"`
+}
+
+type BucketSeries struct {
+	Since         int64            `json:"since"`
+	Until         int64            `json:"until"`
+	BucketSeconds int              `json:"bucket_seconds"`
+	Aggregation   string           `json:"aggregation"`
+	SourceRows    int64            `json:"source_rows"`
+	Columns       []string         `json:"columns"`
+	Count         int              `json:"count"`
+	Buckets       []map[string]any `json:"buckets"`
+	Truncated     bool             `json:"truncated"`
+	Note          string           `json:"note"`
+}
+
+// QuerySamplesBucketed aggregates inside SQLite instead of shipping the raw
+// rows to the client. A 30-day window at a 10 s cadence is 259 200 rows: the
+// raw answer would be truncated by `limit` and the client would silently chart
+// the oldest slice of it. Bucketing answers the question that was actually
+// asked ("what did the last month look like") with one row per 10m/1h/1d.
+//
+// Every bucket carries, per metric, the count of real readings, the average,
+// the extremes and the most recent value. `last` is the value nearest the end
+// of the bucket, so a chart's final point is the real last reading rather than
+// an average the phone never measured.
+func (s *Store) QuerySamplesBucketed(metrics []string, since, until int64, bucketSec, limit int) (*BucketSeries, error) {
+	cols, err := resolveMetrics(metrics)
+	if err != nil {
+		return nil, err
+	}
+	if bucketSec < 60 {
+		bucketSec = 60
+	}
+	if bucketSec > 7*86400 {
+		bucketSec = 7 * 86400
+	}
+	if limit <= 0 {
+		limit = 720
+	}
+	if limit > 20000 {
+		limit = 20000
+	}
+	if until <= 0 {
+		until = time.Now().Unix()
+	}
+	if since <= 0 {
+		since = until - 30*24*3600
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var sourceRows int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM samples WHERE ts >= ? AND ts <= ?`, since, until).
+		Scan(&sourceRows); err != nil {
+		return nil, err
+	}
+
+	// Buckets are aligned to the epoch, not to `since`: two queries over
+	// overlapping windows then return the same buckets for the same clock
+	// times, which is what makes an aggregated series comparable with another.
+	type statRow struct {
+		bucket int64
+		st     BucketStat
+	}
+	perMetric := make(map[string][]statRow, len(cols)-1)
+	bucketSet := map[int64]bool{}
+	for _, c := range cols[1:] {
+		q := `WITH g AS (
+			SELECT (ts / ?) * ? AS b, COUNT(` + c + `) AS n,
+			       AVG(` + c + `) AS a, MIN(` + c + `) AS mn, MAX(` + c + `) AS mx
+			FROM samples WHERE ts >= ? AND ts <= ? AND ` + c + ` IS NOT NULL
+			GROUP BY b)
+			SELECT g.b, g.n, g.a, g.mn, g.mx,
+			       (SELECT s2.` + c + ` FROM samples s2
+			         WHERE s2.ts >= g.b AND s2.ts < g.b + ? AND s2.` + c + ` IS NOT NULL
+			         ORDER BY s2.ts DESC LIMIT 1)
+			FROM g ORDER BY g.b DESC LIMIT ?`
+		rows, err := s.db.Query(q, bucketSec, bucketSec, since, until, bucketSec, limit)
+		if err != nil {
+			return nil, fmt.Errorf("bucket query for %s: %w", c, err)
+		}
+		for rows.Next() {
+			var b int64
+			var st BucketStat
+			var avg, mn, mx, last sql.NullFloat64
+			if err := rows.Scan(&b, &st.N, &avg, &mn, &mx, &last); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			st.Avg, st.Min, st.Max, st.Last = fp(avg), fp(mn), fp(mx), fp(last)
+			perMetric[c] = append(perMetric[c], statRow{bucket: b, st: st})
+			bucketSet[b] = true
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	buckets := make([]int64, 0, len(bucketSet))
+	for b := range bucketSet {
+		buckets = append(buckets, b)
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
+
+	out := &BucketSeries{
+		Since: since, Until: until, BucketSeconds: bucketSec,
+		Aggregation: "per bucket and metric: n (readings), avg, min, max, last (most recent reading in the bucket); " +
+			"n=0 with nulls means nothing was measured in that bucket, which is not the same as a measured zero",
+		SourceRows: sourceRows, Columns: cols[1:],
+		Count:     len(buckets),
+		Truncated: len(buckets) >= limit,
+		Note: "buckets are left-aligned to the epoch and sorted oldest first; " +
+			"points are [ts, {n,avg,min,max,last}] per metric",
+	}
+	for _, b := range buckets {
+		row := map[string]any{"ts": b}
+		for _, c := range cols[1:] {
+			for _, sr := range perMetric[c] {
+				if sr.bucket == b {
+					row[c] = sr.st
+					break
+				}
+			}
+			if _, ok := row[c]; !ok {
+				row[c] = BucketStat{}
+			}
+		}
+		out.Buckets = append(out.Buckets, row)
+	}
+	return out, nil
+}
+
+func fp(v sql.NullFloat64) *float64 {
+	if !v.Valid {
+		return nil
+	}
+	f := round2(v.Float64)
+	return &f
+}
+
+// ---------- hourly rollup ----------
+
+// rollupMetricColumns are the metrics worth keeping for years. Quality
+// metadata (flags, gaps, measured counts) is deliberately excluded: those
+// describe the *rows*, are fully reported by /api/v1/history/quality while the
+// raw samples exist, and averaging them per hour says nothing useful.
+var rollupMetricColumns = func() []string {
+	out := make([]string, 0, len(sampleColumns))
+	for _, c := range SampleColumns() {
+		if c == "full" || sampleQualityColumnSet[c] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}()
+
+var rollupMetricSet = func() map[string]bool {
+	m := make(map[string]bool, len(rollupMetricColumns))
+	for _, c := range rollupMetricColumns {
+		m[c] = true
+	}
+	return m
+}()
+
+// rollupHours folds raw samples into rollup_hourly, one grouped statement per
+// metric (never one row at a time) and returns how many aggregate rows were
+// written.
+//
+// Only complete hours are folded. The hour in progress is still growing, so an
+// average over it would be wrong in a way that nothing later corrects — it
+// would sit in the database forever as a plausible-looking low number.
+func (s *Store) rollupHours(now time.Time, h HistoryConfig) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rollupHoursLocked(now, h)
+}
+
+// rollupHoursLocked is the body of rollupHours with the caller owning s.mu,
+// so Prune can fold aggregates without deadlocking on its own lock.
+func (s *Store) rollupHoursLocked(now time.Time, h HistoryConfig) (int64, error) {
+	end := now.Truncate(time.Hour).Unix()
+	var start int64
+	if v, ok := s.metaGet("rollup_hour"); ok {
+		fmt.Sscanf(v, "%d", &start)
+	}
+	if start <= 0 {
+		var oldest int64
+		if err := s.db.QueryRow(`SELECT COALESCE(MIN(ts), 0) FROM samples`).Scan(&oldest); err != nil {
+			return 0, err
+		}
+		if oldest <= 0 {
+			return 0, nil
+		}
+		start = oldest - oldest%3600
+	}
+	if start >= end {
+		return 0, nil
+	}
+	// A fresh database (or one upgraded from a build without rollups) can hold
+	// weeks of samples: folding all of it in one call would hold the writer for
+	// seconds and stall the sampling loop behind it. Bounding the work per pass
+	// lets it catch up over successive prune passes instead.
+	const maxHoursPerPass = 48
+	if end-start > maxHoursPerPass*3600 {
+		end = start + maxHoursPerPass*3600
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	var written int64
+	for _, c := range rollupMetricColumns {
+		// `last` is the reading closest to the end of the hour, which is what a
+		// chart labels that hour with. The subquery is written as a ts range
+		// rather than `(ts/3600)*3600 = g.h` on purpose: the range form uses the
+		// primary-key index on ts and stops after one row, while the expression
+		// form would force a full scan of the hour per bucket.
+		st, err := tx.Prepare(`WITH g AS (
+			SELECT (ts / 3600) * 3600 AS h, COUNT(` + c + `) AS n,
+			       AVG(` + c + `) AS avg, MIN(` + c + `) AS mn, MAX(` + c + `) AS mx
+			FROM samples WHERE ts >= ? AND ts < ? AND ` + c + ` IS NOT NULL
+			GROUP BY h)
+			INSERT INTO rollup_hourly (ts_hour, metric, n, avg, min, max, last)
+			SELECT g.h, ?, g.n, g.avg, g.mn, g.mx,
+			       (SELECT s2.` + c + ` FROM samples s2
+			         WHERE s2.ts >= g.h AND s2.ts < g.h + 3600 AND s2.` + c + ` IS NOT NULL
+			         ORDER BY s2.ts DESC LIMIT 1)
+			FROM g
+			ON CONFLICT(ts_hour, metric) DO UPDATE SET
+				n = excluded.n, avg = excluded.avg, min = excluded.min, max = excluded.max, last = excluded.last`)
+		if err != nil {
+			tx.Rollback()
+			return written, err
+		}
+		res, err := st.Exec(start, end, c)
+		st.Close()
+		if err != nil {
+			tx.Rollback()
+			return written, fmt.Errorf("rollup %s: %w", c, err)
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			written += n
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return written, err
+	}
+	if err := s.metaSet("rollup_hour", fmt.Sprint(end)); err != nil {
+		return written, err
+	}
+	return written, nil
+}
+
+type RollupPoint struct {
+	Metric string   `json:"metric"`
+	TsHour int64    `json:"ts_hour"`
+	N      int64    `json:"n"`
+	Avg    *float64 `json:"avg"`
+	Min    *float64 `json:"min"`
+	Max    *float64 `json:"max"`
+	Last   *float64 `json:"last"`
+}
+
+type RollupResult struct {
+	Since         int64         `json:"since"`
+	Until         int64         `json:"until"`
+	Metrics       []string      `json:"metrics"`
+	Count         int           `json:"count"`
+	Rows          []RollupPoint `json:"rows"`
+	Truncated     bool          `json:"truncated"`
+	OldestTSHour  int64         `json:"oldest_ts_hour"`
+	NewestTSHour  int64         `json:"newest_ts_hour"`
+	RollupRows    int64         `json:"rollup_rows_total"`
+	Source        string        `json:"source"`
+	Note          string        `json:"note"`
+}
+
+// QueryRollup reads the hourly trend. It is the only path that still answers
+// "what did last month look like" after the raw samples were pruned, so it
+// reports its own coverage (oldest/newest hour) and never pretends an empty
+// stretch is a zero.
+func (s *Store) QueryRollup(metrics []string, since, until int64, limit int) (*RollupResult, error) {
+	if len(metrics) == 0 {
+		metrics = []string{"battery_capacity_pct", "battery_temp_c", "cpu_usage_pct", "mem_used_pct", "max_temp_c"}
+	}
+	names := make([]string, 0, len(metrics))
+	seen := map[string]bool{}
+	for _, m := range metrics {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		if !rollupMetricSet[m] {
+			return nil, fmt.Errorf("unknown rollup metric %q (see GET /api/v1/history/quality for the rolled-up set)", m)
+		}
+		seen[m] = true
+		names = append(names, m)
+	}
+	if limit <= 0 {
+		limit = 720
+	}
+	if limit > 20000 {
+		limit = 20000
+	}
+	if until <= 0 {
+		until = time.Now().Unix()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := &RollupResult{Since: since, Until: until, Metrics: names, Rows: make([]RollupPoint, 0, 64),
+		Source: "rollup_hourly",
+		Note: "one row per hour and metric, built from the raw samples before they age out; " +
+			"n is how many real readings that hour had (0 would mean none, and then avg/min/max/last are null)"}
+	if err := s.db.QueryRow(`SELECT COALESCE(MIN(ts_hour),0), COALESCE(MAX(ts_hour),0), COUNT(*) FROM rollup_hourly`).
+		Scan(&out.OldestTSHour, &out.NewestTSHour, &out.RollupRows); err != nil {
+		return nil, err
+	}
+	for _, c := range names {
+		q := `SELECT ts_hour, n, avg, min, max, last FROM rollup_hourly
+		      WHERE metric = ? AND ts_hour >= ? AND ts_hour <= ? ORDER BY ts_hour DESC LIMIT ?`
+		rows, err := s.db.Query(q, c, since, until, limit)
+		if err != nil {
+			return nil, err
+		}
+		n := 0
+		for rows.Next() {
+			p := RollupPoint{Metric: c}
+			var avg, mn, mx, last sql.NullFloat64
+			if err := rows.Scan(&p.TsHour, &p.N, &avg, &mn, &mx, &last); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			p.Avg, p.Min, p.Max, p.Last = fp(avg), fp(mn), fp(mx), fp(last)
+			out.Rows = append(out.Rows, p)
+			n++
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		if n >= limit {
+			out.Truncated = true
+		}
+	}
+	sort.Slice(out.Rows, func(i, j int) bool {
+		if out.Rows[i].TsHour != out.Rows[j].TsHour {
+			return out.Rows[i].TsHour < out.Rows[j].TsHour
+		}
+		return out.Rows[i].Metric < out.Rows[j].Metric
+	})
+	out.Count = len(out.Rows)
+	return out, nil
+}
+
+// SeedQualityState loads the newest stored row's counter baselines so the
+// regression checks work across a daemon restart, not only within one run. The
+// monotonic clock is left unknown (0): it does not survive a restart, and
+// pretending it does would flag a clock jump on every restart.
+func (s *Store) SeedQualityState() QualityState {
+	var st QualityState
+	var ts int64
+	var up, chg sql.NullFloat64
+	var rx, tx sql.NullInt64
+	err := s.db.QueryRow(
+		`SELECT ts, uptime_s, net_rx_bytes, net_tx_bytes, battery_charge_mah
+		 FROM samples ORDER BY ts DESC LIMIT 1`).Scan(&ts, &up, &rx, &tx, &chg)
+	if err != nil {
+		return st
+	}
+	st.HasPrev = true
+	st.PrevTs = ts
+	st.PrevMonoMS = 0
+	// The baselines live in PrevCounters (that is what Evaluate compares
+	// against); PrevUptime is kept in step because the reboot check reads it.
+	st.PrevCounters = map[string]float64{}
+	if up.Valid {
+		st.PrevUptime = up.Float64
+		st.PrevCounters["uptime_s"] = up.Float64
+	}
+	if chg.Valid {
+		st.PrevCounters[chargeCounterColumn] = chg.Float64
+	}
+	if rx.Valid && rx.Int64 > 0 {
+		st.PrevCounters["net_rx_bytes"] = float64(rx.Int64)
+	}
+	if tx.Valid && tx.Int64 > 0 {
+		st.PrevCounters["net_tx_bytes"] = float64(tx.Int64)
+	}
+	return st
+}
+
 // ---------- stats ----------
 
 type StoreStats struct {
@@ -1095,6 +1741,21 @@ type StoreStats struct {
 	PrunedTotal      int64          `json:"pruned_total"`
 	DroppedLogLines  int64          `json:"dropped_log_lines"`
 	LogSource        map[string]int `json:"logs_by_source"`
+
+	// --- data-quality counters (schema v3) ---
+	SchemaVersion   int    `json:"schema_version"`
+	SchemaExpected  int    `json:"schema_expected"`
+	RollupRows      int64  `json:"rollup_hourly_rows"`
+	RollupOldest    int64  `json:"rollup_oldest_ts_hour"`
+	RollupNewest    int64  `json:"rollup_newest_ts_hour"`
+	RollupWatermark int64  `json:"rollup_watermark_hour"`
+	RollupEnabled   bool   `json:"rollup_enabled"`
+	RollupRetention int    `json:"rollup_retention_days"`
+	DedupedSamples  int64  `json:"deduped_samples_total"`
+	RejectedSamples int64  `json:"rows_with_rejected_values"`
+	RejectedValues  int64  `json:"rejected_value_total"`
+	QualityRows     int64  `json:"rows_with_quality_metadata"`
+	SampleColumnsN  int    `json:"metric_columns"`
 }
 
 // metaSet/metaGet store small bookkeeping values (schema version, growth
@@ -1199,6 +1860,32 @@ func (s *Store) Stats(h HistoryConfig) (*StoreStats, error) {
 	st.PrunedTotal = s.pruned.Load()
 	st.DroppedLogLines = s.sink.drops.Load()
 
+	// Data-quality counters. schema_version is read from meta (what the file
+	// actually is) and compared with the version this build writes, so a
+	// half-migrated database is visible rather than assumed.
+	st.SchemaExpected = schemaVersion
+	st.SampleColumnsN = metricColumnCount()
+	if v, ok := s.metaGet("schema"); ok {
+		fmt.Sscanf(v, "%d", &st.SchemaVersion)
+	}
+	if v, ok := s.metaGet("samples_deduped_total"); ok {
+		fmt.Sscanf(v, "%d", &st.DedupedSamples)
+	}
+	if v, ok := s.metaGet("rollup_hour"); ok {
+		fmt.Sscanf(v, "%d", &st.RollupWatermark)
+	}
+	s.db.QueryRow(`SELECT COALESCE(MIN(ts_hour),0), COALESCE(MAX(ts_hour),0), COUNT(*) FROM rollup_hourly`).
+		Scan(&st.RollupOldest, &st.RollupNewest, &st.RollupRows)
+	st.RollupEnabled = h.RollupEnabled
+	st.RollupRetention = h.RollupRetentionDays
+	// A row "has rejected values" when rejected_cols holds a non-empty JSON
+	// array. Counting the rows and summing the entries needs SQLite's JSON
+	// functions to be present, so the entries are counted from the stored
+	// column text instead — the value is small (it is an anomaly log).
+	s.db.QueryRow(`SELECT COUNT(*) FROM samples WHERE rejected_cols IS NOT NULL AND rejected_cols <> '[]'`).
+		Scan(&st.RejectedSamples)
+	st.QualityRows = count(`SELECT COUNT(*) FROM samples WHERE measured_cols IS NOT NULL`)
+
 	rows, err := s.db.Query(`SELECT source, COUNT(*) FROM logs GROUP BY source`)
 	if err == nil {
 		defer rows.Close()
@@ -1221,8 +1908,28 @@ func SampleColumns() []string {
 			c == "hottest_zone" || c == "wifi_ssid" || c == "cpu_freqs_khz" {
 			continue // strings/arrays: not graphed
 		}
+		// The schema v3 quality metadata describes the row rather than the
+		// phone: listing absent_cols among the "metrics to graph" would invite
+		// someone to chart it.
+		if sampleQualityColumnSet[c] {
+			continue
+		}
 		out = append(out, c)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// metricColumnCount is how many columns a fully measured row carries: the
+// metric columns, excluding ts and the quality metadata. It is the denominator
+// behind measured_cols, so it must not drift from sampleColumns.
+func metricColumnCount() int {
+	n := 0
+	for _, c := range sampleColumns {
+		if c == "ts" || sampleQualityColumnSet[c] {
+			continue
+		}
+		n++
+	}
+	return n
 }

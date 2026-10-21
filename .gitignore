@@ -1,4 +1,5 @@
 # build outputs (regenerate with ./build.sh)
+phoneserver
 phoneserver-arm64
 phoneserver-amd64
 ps-static
@@ -7,6 +8,15 @@ ps-host
 
 # the module's binary is produced by build.sh, not tracked
 module/bin/phoneserver
+
+# the WebUI is a Vite project: sources are tracked, node_modules/dist are not.
+# module/webroot/ IS tracked on purpose — it is the built bundle that ships
+# inside the module zip, and the phone has no node to rebuild it.
+webui/node_modules
+qa/realdb/
+webui/dist
+webui/.vite
+webui/*.log
 
 # editor / OS noise
 *.swp

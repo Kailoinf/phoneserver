@@ -3,11 +3,9 @@ package main
 // Screenshots.
 //
 // A frame exists only while a request for one is being served: there is no
-// background capture, nothing is written to the history database, and nothing
-// is ever included in a push. The push payload is built from the telemetry
-// document, which has no image field, so a remote database cannot receive a
-// screenshot even when pushing is enabled. The response says so explicitly
-// ("stored": false, "pushed": false) so a client does not have to guess.
+// background capture and nothing is written to the history database. This
+// server has no upload path at all, so the response states "stored": false and
+// a client does not have to guess where the bytes went.
 //
 // The capture itself is delegated to the platform's own /system/bin/screencap
 // (the same tool adb and the power menu use). A window marked FLAG_SECURE makes
@@ -231,9 +229,8 @@ func (a *App) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 			"capture_ms":    captureMS,
 			"encode_ms":     encodeMS,
 			"display":       orPrimary(o.display),
-			// The two guarantees, stated in the response rather than only in docs.
+			// The guarantee, stated in the response rather than only in docs.
 			"stored": false,
-			"pushed": false,
 		}
 		if o.quality == shotDefaultQual && o.format == "png" {
 			out["quality"] = nil // no meaning for lossless png
@@ -257,8 +254,7 @@ func (a *App) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Screenshot-Source-Bytes", strconv.Itoa(len(raw)))
 	h.Set("X-Screenshot-Capture-Ms", strconv.FormatInt(captureMS, 10))
 	h.Set("X-Screenshot-Encode-Ms", strconv.FormatInt(encodeMS, 10))
-	h.Set("X-Screenshot-Stored", "false") // never in the history database
-	h.Set("X-Screenshot-Pushed", "false") // never to a remote push target
+	h.Set("X-Screenshot-Stored", "false") // never written to the history database
 	h.Set("Access-Control-Expose-Headers", "X-Screenshot-Format, X-Screenshot-Quality, X-Screenshot-Size, X-Screenshot-Capture-Ms, X-Screenshot-Encode-Ms")
 	if o.attach {
 		h.Set("Content-Disposition",

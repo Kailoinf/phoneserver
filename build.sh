@@ -1,10 +1,12 @@
 #!/bin/sh
-# Build the daemon for Android and package it as an installable module zip.
+# Build the daemon for Android, build the WebUI, and package the module zip.
 #
 #   ./build.sh            -> phoneserver-arm64 + phoneserver-module.zip
 #
-# Requires Go. Cross-compiles offline: the program uses the standard library
-# only, so there are no module downloads.
+# Requires Go. The cross-compile needs no network (the daemon uses the standard
+# library plus three pinned dependencies). The WebUI is a Vite project under
+# webui/: it is rebuilt when its node_modules are present, otherwise the bundle
+# committed in module/webroot/ ships as-is — the phone never needs node.
 set -eu
 cd "$(dirname "$0")"
 
@@ -20,6 +22,31 @@ if readelf -l "$OUT" 2>/dev/null | grep -q INTERP; then
     echo "FATAL: $OUT has a PT_INTERP segment — Android cannot exec it." >&2
     echo "Remove -buildmode=pie: a static ET_EXEC is what Android needs." >&2
     exit 1
+fi
+
+echo "==> running the test suite"
+if ! go test ./... ; then
+    echo "FATAL: tests failed — not packaging a build that fails its own tests." >&2
+    exit 1
+fi
+
+echo "==> building the WebUI (webui/ -> module/webroot)"
+if [ -f webui/package.json ]; then
+    if [ -d webui/node_modules ]; then
+        if (cd webui && pnpm build); then
+            echo "   WebUI rebuilt from webui/"
+        else
+            echo "!! WebUI build failed; shipping the committed module/webroot as-is"
+        fi
+    else
+        echo "   webui/node_modules is missing (run: cd webui && pnpm install)"
+        echo "   shipping the committed module/webroot as-is"
+    fi
+fi
+if [ -f module/webroot/index.html ]; then
+    echo "   webroot: $(find module/webroot -type f | wc -l) file(s), $(du -sh module/webroot | cut -f1)"
+else
+    echo "!! module/webroot/index.html is missing — /ui/ will not be served" >&2
 fi
 
 echo "==> staging into the module tree"

@@ -45,7 +45,7 @@ button:hover{border-color:var(--acc)}
   <span style="margin-left:auto"></span>
   <input id="tok" type="password" placeholder="api token" size="28">
   <button onclick="saveTok()">save</button>
-  <button onclick="pushNow()">push now</button>
+  <button onclick="openUI()">打开完整界面 /ui/</button>
 </header>
 <main id="grid"></main>
 <div style="padding:0 18px 14px">
@@ -167,7 +167,7 @@ async function shot(){
   }catch(e){$('#smeta').textContent='截图失败：'+String(e.message||e);}
 }
 function shotDownload(){if(!shotURL)return;const a=document.createElement('a');a.href=shotURL;a.download=shotName;a.click();}
-async function pushNow(){try{const r=await api('/api/v1/push',{method:'POST'});$('#err').textContent='push: '+(r.ok?('ok #'+r.http_status):(r.last_error||'failed'));}catch(e){$('#err').textContent=String(e.message||e);}}
+function openUI(){window.open('/ui/','_blank');}
 $('#tok').value=localStorage.getItem('ps_tok')||'';
 
 /* ---------------- history panel (SQLite-backed) ---------------- */
