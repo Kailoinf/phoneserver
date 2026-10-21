@@ -256,9 +256,17 @@ func newToken() string {
 }
 
 // loopbackHost reports whether a listen address stays on the device itself.
+//
+// An empty host is NOT loopback: net.Listen treats ":8080" as "every
+// interface", so accepting it here let a config of ":8080" (or a listen string
+// the parser could not split) pass the loopback gate and expose the phone.
+// Caught by TestEffectiveListenGatesNonLoopback.
 func loopbackHost(host string) bool {
 	h := strings.TrimSpace(host)
-	if h == "" || h == "localhost" {
+	if h == "" {
+		return false
+	}
+	if h == "localhost" {
 		return true
 	}
 	h = strings.Trim(h, "[]")
@@ -802,9 +810,9 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(shares)
 		out["file_shares"] = shares
 		out["file_service"] = map[string]any{
-			"http":     cfg.Files.HTTP,
-			"webdav":   cfg.Files.WebDAV,
-			"read_only": cfg.Files.ReadOnly,
+			"http":         cfg.Files.HTTP,
+			"webdav":       cfg.Files.WebDAV,
+			"read_only":    cfg.Files.ReadOnly,
 			"allow_delete": cfg.Files.AllowDelete,
 		}
 	}

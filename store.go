@@ -847,14 +847,14 @@ func (s *Store) BackfillLogs(paths []string) (inserted int, files int, err error
 // ---------- retention ----------
 
 type PruneResult struct {
-	SamplesDeleted   int64 `json:"samples_deleted"`
-	SnapshotsDeleted int64 `json:"snapshots_deleted"`
-	LogsDeleted      int64 `json:"logs_deleted"`
-	RollupRows       int64 `json:"rollup_rows_upserted"`
-	RollupDeleted    int64 `json:"rollup_hours_deleted"`
-	SizeCapEvicted   int64 `json:"size_cap_evicted"`
-	DBBytesBefore    int64 `json:"db_bytes_before"`
-	DBBytesAfter     int64 `json:"db_bytes_after"`
+	SamplesDeleted   int64  `json:"samples_deleted"`
+	SnapshotsDeleted int64  `json:"snapshots_deleted"`
+	LogsDeleted      int64  `json:"logs_deleted"`
+	RollupRows       int64  `json:"rollup_rows_upserted"`
+	RollupDeleted    int64  `json:"rollup_hours_deleted"`
+	SizeCapEvicted   int64  `json:"size_cap_evicted"`
+	DBBytesBefore    int64  `json:"db_bytes_before"`
+	DBBytesAfter     int64  `json:"db_bytes_after"`
 	RollupError      string `json:"rollup_error,omitempty"`
 }
 
@@ -1583,17 +1583,17 @@ type RollupPoint struct {
 }
 
 type RollupResult struct {
-	Since         int64         `json:"since"`
-	Until         int64         `json:"until"`
-	Metrics       []string      `json:"metrics"`
-	Count         int           `json:"count"`
-	Rows          []RollupPoint `json:"rows"`
-	Truncated     bool          `json:"truncated"`
-	OldestTSHour  int64         `json:"oldest_ts_hour"`
-	NewestTSHour  int64         `json:"newest_ts_hour"`
-	RollupRows    int64         `json:"rollup_rows_total"`
-	Source        string        `json:"source"`
-	Note          string        `json:"note"`
+	Since        int64         `json:"since"`
+	Until        int64         `json:"until"`
+	Metrics      []string      `json:"metrics"`
+	Count        int           `json:"count"`
+	Rows         []RollupPoint `json:"rows"`
+	Truncated    bool          `json:"truncated"`
+	OldestTSHour int64         `json:"oldest_ts_hour"`
+	NewestTSHour int64         `json:"newest_ts_hour"`
+	RollupRows   int64         `json:"rollup_rows_total"`
+	Source       string        `json:"source"`
+	Note         string        `json:"note"`
 }
 
 // QueryRollup reads the hourly trend. It is the only path that still answers
@@ -1743,19 +1743,19 @@ type StoreStats struct {
 	LogSource        map[string]int `json:"logs_by_source"`
 
 	// --- data-quality counters (schema v3) ---
-	SchemaVersion   int    `json:"schema_version"`
-	SchemaExpected  int    `json:"schema_expected"`
-	RollupRows      int64  `json:"rollup_hourly_rows"`
-	RollupOldest    int64  `json:"rollup_oldest_ts_hour"`
-	RollupNewest    int64  `json:"rollup_newest_ts_hour"`
-	RollupWatermark int64  `json:"rollup_watermark_hour"`
-	RollupEnabled   bool   `json:"rollup_enabled"`
-	RollupRetention int    `json:"rollup_retention_days"`
-	DedupedSamples  int64  `json:"deduped_samples_total"`
-	RejectedSamples int64  `json:"rows_with_rejected_values"`
-	RejectedValues  int64  `json:"rejected_value_total"`
-	QualityRows     int64  `json:"rows_with_quality_metadata"`
-	SampleColumnsN  int    `json:"metric_columns"`
+	SchemaVersion   int   `json:"schema_version"`
+	SchemaExpected  int   `json:"schema_expected"`
+	RollupRows      int64 `json:"rollup_hourly_rows"`
+	RollupOldest    int64 `json:"rollup_oldest_ts_hour"`
+	RollupNewest    int64 `json:"rollup_newest_ts_hour"`
+	RollupWatermark int64 `json:"rollup_watermark_hour"`
+	RollupEnabled   bool  `json:"rollup_enabled"`
+	RollupRetention int   `json:"rollup_retention_days"`
+	DedupedSamples  int64 `json:"deduped_samples_total"`
+	RejectedSamples int64 `json:"rows_with_rejected_values"`
+	RejectedValues  int64 `json:"rejected_value_total"`
+	QualityRows     int64 `json:"rows_with_quality_metadata"`
+	SampleColumnsN  int   `json:"metric_columns"`
 }
 
 // metaSet/metaGet store small bookkeeping values (schema version, growth

@@ -461,14 +461,16 @@ func (a *App) loopTiming() map[string]any {
 	if n == 0 {
 		return map[string]any{"note": "no tick completed yet"}
 	}
-	avg := func(sum atomic.Int64) float64 { return round2(float64(sum.Load()) / float64(n)) }
+	// Take a pointer: copying an atomic.Int64 trips go vet (noCopy) and reads a
+	// value the runtime is allowed to be moving.
+	avg := func(sum *atomic.Int64) float64 { return round2(float64(sum.Load()) / float64(n)) }
 	return map[string]any{
 		"last_collect_ms": a.histLastCollect.Load(),
 		"last_write_ms":   a.histLastWrite.Load(),
 		"last_gap_ms":     a.histLastGap.Load(),
-		"avg_collect_ms":  avg(a.histSumCollect),
-		"avg_write_ms":    avg(a.histSumWrite),
-		"avg_gap_ms":      avg(a.histSumGap),
+		"avg_collect_ms":  avg(&a.histSumCollect),
+		"avg_write_ms":    avg(&a.histSumWrite),
+		"avg_gap_ms":      avg(&a.histSumGap),
 		"ticks_measured":  n,
 		"note":            "gap = time between the start of two consecutive ticks (wait + collection + write of the previous cycle)",
 	}
