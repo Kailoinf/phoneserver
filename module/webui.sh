@@ -136,10 +136,18 @@ cmd_status() {
     printf '}\n'
 }
 
+watchdogs() {
+    ps -A -o PID,ARGS 2>/dev/null | grep -v grep | grep -F "$MODDIR/watchdog.sh" | awk '{print $1}'
+}
+
 cmd_restart() {
     "$MODDIR/bin/phoneserver" -stop -config "$CFG" >/dev/null 2>&1
+    # Kill the old watchdog(s) first. Starting a second one next to a live one
+    # gives two restart loops fighting over the port (EADDRINUSE flap), which is
+    # exactly what happened on device after two restarts were issued in a row.
+    for P in $(watchdogs); do kill "$P" 2>/dev/null; done
     for P in $(running); do kill "$P" 2>/dev/null; done
-    sleep 1
+    sleep 2
     if [ -x "$MODDIR/watchdog.sh" ]; then
         if command -v setsid >/dev/null 2>&1; then
             setsid "$MODDIR/watchdog.sh" </dev/null >>"$DATA/logs/stdout.log" 2>&1 &

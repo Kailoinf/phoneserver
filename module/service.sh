@@ -26,6 +26,12 @@ done
 # detached so it survives this script exiting.
 pkill -f "$MODDIR/bin/phoneserver" 2>/dev/null
 [ -f "$DATA/watchdog.pid" ] && kill "$(cat "$DATA/watchdog.pid")" 2>/dev/null
+# Also stop watchdog processes that are not the one named in the pid file: two
+# watchdogs restarting the same daemon flap on EADDRINUSE forever.
+for P in $(ps -A -o PID,ARGS 2>/dev/null | grep -v grep | grep -F "$MODDIR/watchdog.sh" | awk '{print $1}'); do
+    kill "$P" 2>/dev/null
+done
+sleep 1
 
 if command -v setsid >/dev/null 2>&1; then
     setsid "$MODDIR/watchdog.sh" </dev/null >>"$DATA/logs/stdout.log" 2>&1 &
