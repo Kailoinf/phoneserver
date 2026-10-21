@@ -116,7 +116,14 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		"points":    res.Points,
 		"truncated": res.Truncated,
 		"stats":     res.Stats,
-		"note":      "points are [ts, metric...] oldest first; ts is a unix second",
+		// Columns the cheap tick cannot measure (Wi-Fi, package counts, process
+		// count, remaining charge time) are stored as NULL and carried forward
+		// from the last full tick, so a series has no holes. Say which ones were
+		// carried: a client should not mistake a flat stretch for real data at
+		// full resolution.
+		"carried_columns": res.Carried,
+		"note": "points are [ts, metric...] oldest first; ts is a unix second. " +
+			"Columns listed in carried_columns were measured on an earlier full tick",
 	})
 }
 

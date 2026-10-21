@@ -224,6 +224,41 @@ scalar metrics keep their 10 s cadence. At 10 s / 60 s the estimate drops to
 about 0.3% of a core. Every row carries a `full` column so you always know which
 kind of tick produced it.
 
+### Sampling tiers: 10 s for what matters, 60 s for the rest
+
+`interval_seconds` (default **10**) is the sampling period; `full_seconds`
+(default **60**) is how often the *complete document* is stored. The reason is
+measured, not aesthetic: the complete document is 22.6 KB (every thermal zone,
+every interface, the process list) while the scalar row is 65 numbers, and at a
+10 s cadence the document is the entire disk cost.
+
+    every 10 s  (cheap tick) 65 scalar metrics - battery, temps, CPU, memory,
+                             rates, screen, charging
+    every 60 s  (full tick)  the complete document, plus the columns the cheap
+                             tick cannot measure
+
+    Measured: 66 MB/day -> 13.5 MB/day, and 1261 -> ~270 CPU-seconds/day.
+
+Every row carries a `full` column saying which kind it is. Setting
+`full_seconds: 10` gives a complete document on every tick.
+
+### Columns a cheap tick cannot see: NULL, never 0
+
+A cheap tick does not spawn `cmd wifi` or `pm list packages`, so 14 columns are
+simply not measurable in those rows: `wifi_ssid`, `wifi_connected`,
+`wifi_rssi_dbm`, `wifi_signal_pct`, `wifi_link_mbps`, `wifi_freq_mhz`,
+`wifi_channel`, `pkg_total`, `pkg_user`, `pkg_system`, `pkg_disabled`,
+`proc_count`, `battery_time_to_full_s`, `battery_time_to_empty_s`.
+
+They are stored as **NULL, not 0** - a zero would read as a real measurement
+("0 % signal", "0 apps installed"). `/api/v1/history` carries the last measured
+value forward so a series has no holes, and names the columns it did that for:
+
+    "carried_columns": ["pkg_total", "proc_count", "wifi_signal_pct"]
+
+The `stats` min/avg/max are computed over genuinely measured values only, so
+those stay clean.
+
 ## Units and conventions
 
 - Every value is the raw kernel value where units are unambiguous, with a

@@ -68,7 +68,7 @@ curl -H 'X-API-Key: <令牌>' http://192.168.1.50:8080/api/v1/all   # 全部数�
 | PUT | `/api/v1/config` | 改推送地址/间隔/令牌/TTL/端口 |
 | GET | `/api/v1/push` | 推送状态：计数、上次结果、上次错误 |
 | POST | `/api/v1/push` | 立刻推送一次，返回结果 |
-| GET | `/api/v1/history` | 查询历史样本（`metrics`/`since`/`until`/`limit`/`stats`） |
+| GET | `/api/v1/history` | 查询历史样本（`metrics`/`since`/`until`/`limit`/`stats`；响应含 `carried_columns`） |
 | GET | `/api/v1/history/metrics` | 可查询的指标列清单 |
 | GET | `/api/v1/history/logs` | 查询库内日志（`grep`/`level`/`since`） |
 | GET | `/api/v1/history/snapshot` | 取回某个时刻的完整文档（可只取一段） |
@@ -158,12 +158,14 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
     按默认每 10 秒一次                    8640 次/天 ≈ 1261 秒 CPU/天 ≈ 单核 1.46%
     对照：WebUI 打开时（3 秒轮询）         单核约 4.9%
 
-    磁盘（按默认保留策略，1.3.0 起已优化）
-    快照 table    约 22.6 KB 原始 → gzip9 约 4.5 KB，×8640/天 ≈ 36.8 MB/天 × 3 天
-    样本 table    约 3.4 MB/天 × 30 天
+    磁盘（1.3.1 默认设置下实测）
+    总增长        实测 13.5 MB/天（1.3.0 之前是 66 MB/天）
+    快照 table    约 22.6 KB 原始 → gzip9 约 4.5 KB，每分钟一份 ≈ 6.4 MB/天 × 3 天
+    样本 table    每 10 秒一行，约 2.5 MB/天 × 30 天
     日志 table    随访问量而定（每行 62 B 左右 + 哈希索引）
     WAL           上限 1 MB（wal_autocheckpoint=256）
     硬上限        512 MB（超过就按"最老的快照优先"逐出，永远不会把手机塞满）
+    稳态占用      约 130 MB（快照 19 + 样本 75 + 日志若干）
 
 ### 存储占用：做过什么、量到什么
 
@@ -181,21 +183,40 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 | 日志去重索引 (ts_ms, line) → (ts_ms, line_hash) | 索引每行 **90.7 B → 27.3 B（−70%）** | 无（语义不变，插入时算一个 64 位 FNV） |
 | wal_autocheckpoint=256 | WAL 常驻从 ~2.5 MB 降到上限 1 MB | 无明显代价 |
 | auto_vacuum=INCREMENTAL + prune 后 incremental_vacuum | 删除后**页面真的还给系统**，库大小不再停在历史最高水位 | 切换时一次 VACUUM（库小，毫秒级） |
+| **采集频次分级**：完整文档默认 60 秒一次（标量指标仍 10 秒） | 磁盘 **36.8 → 6.4 MB/天**；CPU 1261 → 约 270 秒/天 | 那 22.6 KB 的完整文档（热区全表、网络全表…）从 10 秒分辨率降到 1 分钟 |
+| **廉价行不写测不到的列**（写 NULL，不写 0） | 每行少 14 个值 | 需要读时向前取值，见下 |
+
+合计：**66 MB/天 → 实测 13.5 MB/天**。
 
 关于"按字段去重"：量过，**收益很小**。快照里完全不变的段（device/wifi/gpu/display/packages）占原始文本的 9.8%，但 gzip 之后只占 17.7% 的压缩体积——**gzip 已经在做"不变的部分几乎不花空间"这件事**。所以继续抠字段意义不大。
 
 **真正的杠杆是频次**，见下一节。
 
-### 想更省电/更省空间：降低"完整文档"的频率
+### 采集频次分级：重要的 10 秒，不重要的 60 秒
 
-配置里有两个旋钮：`interval_seconds`（采样周期，默认 10 秒）和 `full_seconds`（采集**完整文档**的周期，默认也是 10 秒，也就是严格按"全部数据每 10 秒一次"）。
+配置里有两个旋钮：`interval_seconds`（采样周期，**默认 10 秒**）和 `full_seconds`（采集**完整文档**的周期，**默认 60 秒**）。
 
-把 `full_seconds` 调成 60：中间的 tick 只走**廉价路径**——只读 sysfs 和 /proc，不 spawn getprop/dumpsys/wifi 子进程；标量指标仍然每 10 秒一条。两个效果都量过：
+原因是量出来的：完整文档 22.6 KB（热区全表、网络全表、进程列表…），标量指标只有一行 65 个数字。前者每 10 秒一次就是全部磁盘开销，而它恰好是"没那么必要那么密"的那部分。
+
+    每 10 秒（廉价 tick）：65 个标量指标 —— 电量/温度/CPU/内存/速率/屏幕/充电…
+    每分钟（完整 tick）：完整文档入库，并补齐廉价 tick 测不到的列
 
     电：每天 CPU 1261 秒 → 约 270 秒（单核 1.46% → 0.31%）
-    盘：快照 36.8 MB/天 → 约 6.1 MB/天（样本那 3.4 MB/天不变）
+    盘：快照 36.8 MB/天 → 6.4 MB/天
 
-权衡说清楚：10 秒与 60 秒之间，**那 22.6 KB 的完整文档（热区全表、网络全表、进程列表…）只有 1 分钟一个采样点**；而 65 个标量指标（电量/温度/CPU/内存/速率…）仍然 10 秒一条。库里每行都有 `full` 列标明是完整采集还是廉价采集，绝不含糊。
+库里每行都有 `full` 列标明这一行是完整采集还是廉价采集，绝不含糊。想让**每一 tick 都是完整文档**（回到"全部数据 10 秒一次"），把两个值设成一样即可：
+
+    { "history": { "interval_seconds": 10, "full_seconds": 10 } }
+
+### 廉价 tick 测不到的列：写 NULL，不写 0
+
+廉价 tick 不 spawn `cmd wifi` / `pm list packages` 这些子进程，所以有 14 列它根本测不到：`wifi_ssid`、`wifi_connected`、`wifi_rssi_dbm`、`wifi_signal_pct`、`wifi_link_mbps`、`wifi_freq_mhz`、`wifi_channel`、`pkg_total`、`pkg_user`、`pkg_system`、`pkg_disabled`、`proc_count`、`battery_time_to_full_s`、`battery_time_to_empty_s`。
+
+这些列在这些行里存 **NULL**——不是 0。写 0 等于编数据（"Wi-Fi 信号 0%"、"装了 0 个应用"）。读取时 API **向前取值**：拿该列最近一次真实测到的值填上，让曲线没有断点，同时在响应里明说是哪几列：
+
+    "carried_columns": ["pkg_total", "proc_count", "wifi_signal_pct"]
+
+`stats` 里的 min/avg/max 只统计**真实测量到**的值，被补上的点不参与——所以那几列的统计量是干净的。
 
     { "history": { "interval_seconds": 10, "full_seconds": 60 } }
 

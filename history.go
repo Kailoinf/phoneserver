@@ -46,10 +46,15 @@ type HistoryConfig struct {
 
 func defaultHistoryConfig() HistoryConfig {
 	return HistoryConfig{
-		Enabled:               true,
-		DBPath:                "/data/adb/phoneserver/history.db",
-		IntervalSeconds:       10,
-		FullSeconds:           10,
+		Enabled:         true,
+		DBPath:          "/data/adb/phoneserver/history.db",
+		IntervalSeconds: 10,
+		// The complete document is an order of magnitude heavier than the scalar
+		// columns (every thermal zone, every interface, the process list) and at
+		// a 10 s cadence it is the entire disk cost. Once a minute keeps the
+		// detail while the 65 scalar metrics still land every 10 s. Set it equal
+		// to IntervalSeconds for a full sample every tick.
+		FullSeconds:           60,
 		RetentionDays:         30,
 		SnapshotRetentionDays: 3,
 		LogRetentionDays:      7,
@@ -220,6 +225,8 @@ func sampleFromSnapshot(snap Snapshot, full int, ts int64) Sample {
 // would have filled stay empty and the row is marked full=0.
 func (a *App) collectCheapSample(ts int64) Sample {
 	sm := Sample{Ts: ts, Full: 0}
+	// These are collected on full ticks only; NULL is the honest representation.
+	sm.markAbsent(cheapAbsentColumns...)
 
 	b := collectBattery()
 	sm.BatteryCapacityPct = float64(b.CapacityPercent)

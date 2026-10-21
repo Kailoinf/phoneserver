@@ -50,6 +50,12 @@ const schemaVersion = 2
 type Sample struct {
 	Ts int64 `json:"ts"`
 
+	// absent names the columns this tick could not measure. They are stored as
+	// NULL rather than a zero, which would read as a real reading: the cheap
+	// tick cannot see Wi-Fi, the package list or the remaining charge times,
+	// and recording 0 for those would invent data instead of omitting it.
+	absent map[string]bool
+
 	BatteryCapacityPct float64 `json:"battery_capacity_pct"`
 	BatteryStatus      string  `json:"battery_status"`
 	BatteryHealth      string  `json:"battery_health"`
@@ -140,8 +146,30 @@ var sampleColumns = []string{
 }
 
 // values mirrors sampleColumns exactly — keep the two in lockstep.
+// markAbsent flags columns this tick did not measure. ts and full never go
+// missing: they describe the row itself.
+func (s *Sample) markAbsent(cols ...string) {
+	if s.absent == nil {
+		s.absent = make(map[string]bool, len(cols))
+	}
+	for _, c := range cols {
+		if c != "ts" && c != "full" {
+			s.absent[c] = true
+		}
+	}
+}
+
+// cheapAbsentColumns are the columns only a full tick can measure. They stay
+// NULL in between and the read path carries the last measured value forward.
+var cheapAbsentColumns = []string{
+	"wifi_ssid", "wifi_connected", "wifi_rssi_dbm", "wifi_signal_pct",
+	"wifi_link_mbps", "wifi_freq_mhz", "wifi_channel",
+	"pkg_total", "pkg_user", "pkg_system", "pkg_disabled",
+	"proc_count", "battery_time_to_full_s", "battery_time_to_empty_s",
+}
+
 func (s Sample) values() []any {
-	return []any{
+	v := []any{
 		s.Ts,
 		s.BatteryCapacityPct, s.BatteryStatus, s.BatteryHealth, s.BatteryTempC,
 		s.BatteryVoltageV, s.BatteryCurrentA, s.BatteryChargeMAh, s.BatteryFullMAh,
@@ -161,6 +189,14 @@ func (s Sample) values() []any {
 		s.PkgTotal, s.PkgUser, s.PkgSystem, s.PkgDisabled,
 		s.Full, s.CollectMS,
 	}
+	if len(s.absent) > 0 {
+		for i, c := range sampleColumns {
+			if s.absent[c] {
+				v[i] = nil
+			}
+		}
+	}
+	return v
 }
 
 // ---------- log rows ----------
@@ -722,7 +758,10 @@ var metricWhitelist = func() map[string]bool {
 }()
 
 type SeriesResult struct {
-	Count     int       `json:"count"`
+	Count int `json:"count"`
+	// Carried lists the columns whose values came from an earlier full tick:
+	// they were not measured in every row of this series.
+	Carried   []string  `json:"carried_columns,omitempty"`
 	Columns   []string  `json:"columns"`
 	Points    [][]any   `json:"points"` // [[ts, v1, v2, ...], ...] oldest first
 	Since     int64     `json:"since"`
@@ -769,6 +808,19 @@ func (s *Store) QuerySamples(metrics []string, since, until int64, limit int, wi
 		since = until - 6*3600
 	}
 
+	// Seed every column with its last measured value before the window, so the
+	// first points are not blank merely because the window starts between two
+	// full ticks. This runs before the main query: with a single pooled
+	// connection, a query issued while the cursor is open waits on itself.
+	seed := make([]any, len(cols))
+	for i := 1; i < len(cols); i++ {
+		var v any
+		if err := s.db.QueryRow("SELECT "+cols[i]+" FROM samples WHERE ts < ? AND "+cols[i]+
+			" IS NOT NULL ORDER BY ts DESC LIMIT 1", since).Scan(&v); err == nil {
+			seed[i] = normalize(v)
+		}
+	}
+
 	q := "SELECT " + strings.Join(cols, ",") + " FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?"
 	rows, err := s.db.Query(q, since, until, limit)
 	if err != nil {
@@ -805,9 +857,32 @@ func (s *Store) QuerySamples(metrics []string, since, until int64, limit int, wi
 		points[i], points[j] = points[j], points[i]
 	}
 
+	// Carry the last measured value forward over the NULLs left by cheap ticks,
+	// and report which columns needed it: a client should not have to guess
+	// whether a flat stretch is a real plateau or a carried value.
+	carried := []string{}
+	for i := 1; i < len(cols); i++ {
+		last := seed[i]
+		filled := false
+		for _, pt := range points {
+			if pt[i] == nil {
+				if last != nil {
+					pt[i] = last
+					filled = true
+				}
+				continue
+			}
+			last = pt[i]
+		}
+		if filled {
+			carried = append(carried, cols[i])
+		}
+	}
+	sort.Strings(carried)
+
 	out := &SeriesResult{
 		Count: len(points), Columns: cols, Points: points,
-		Since: since, Until: until, Truncated: truncated,
+		Since: since, Until: until, Truncated: truncated, Carried: carried,
 	}
 	if withStats && len(points) > 0 {
 		st := &AggStats{Min: map[string]float64{}, Max: map[string]float64{}, Avg: map[string]float64{}, Last: map[string]float64{}}
@@ -829,7 +904,10 @@ func (s *Store) QuerySamples(metrics []string, since, until int64, limit int, wi
 			}
 			st.Min[c], st.Max[c] = round2(min), round2(max)
 			st.Avg[c] = round2(sum / float64(len(vals)))
-			st.Last[c] = round2(vals[len(vals)-1])
+			// Rows are scanned newest first, so vals[0] is the most recent
+			// measured value; vals[len-1] would report the oldest point in the
+			// window as "last".
+			st.Last[c] = round2(vals[0])
 		}
 		out.Stats = st
 	}
