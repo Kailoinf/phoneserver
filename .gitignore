@@ -1,0 +1,13 @@
+# build outputs (regenerate with ./build.sh)
+phoneserver-arm64
+phoneserver-amd64
+ps-static
+ps-host
+*.zip
+
+# the module's binary is produced by build.sh, not tracked
+module/bin/phoneserver
+
+# editor / OS noise
+*.swp
+.DS_Store

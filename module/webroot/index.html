@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>手机数据服务</title>
+<style>
+  :root{
+    color-scheme: dark;
+    --bg:#0f1216; --card:#171c23; --line:#252c37; --fg:#e6edf3; --dim:#8b98a9;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --acc:#58a6ff; --fill:#1f6feb;
+    font:14px/1.5 ui-monospace,Menlo,Consolas,system-ui,sans-serif;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ color-scheme: light; --bg:#f6f7f9; --card:#fff; --line:#e3e8ef; --fg:#1f2328; --dim:#6b7280; --fill:#0b6bcb; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);padding:0 0 28px}
+  header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:12px 14px;background:var(--bg);border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:15px;font-weight:650;letter-spacing:.02em}
+  .pill{padding:2px 9px;border-radius:99px;font-size:11px;border:1px solid var(--line);color:var(--dim)}
+  .pill.on{color:var(--ok);border-color:#1f6f3f}
+  .pill.off{color:var(--bad);border-color:#6e2b2b}
+  .spacer{flex:1}
+  main{padding:12px 14px;display:grid;gap:10px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
+  section{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 13px}
+  section h2{margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:600}
+  .row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;border-bottom:1px dotted var(--line)}
+  .row:last-child{border-bottom:0}
+  .row>span:first-child{color:var(--dim);white-space:nowrap}
+  .row>span:last-child{text-align:right;overflow-wrap:anywhere}
+  .big{font-size:24px;font-weight:650;line-height:1.15;margin-bottom:2px}
+  .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:7px 0 9px}
+  .bar>i{display:block;height:100%;background:var(--fill);width:0}
+  .cores{display:grid;grid-template-columns:repeat(8,1fr);gap:3px;margin:8px 0}
+  .core{position:relative;height:36px;border-radius:4px;background:var(--line);overflow:hidden}
+  .core>i{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--fill);transition:height .35s}
+  .core>b{position:absolute;top:1px;left:0;right:0;text-align:center;font-size:9px;font-weight:400;color:var(--dim)}
+  button{font:inherit;min-height:40px;padding:8px 12px;border-radius:9px;border:1px solid var(--line);
+    background:var(--acc);color:#fff;font-weight:600;cursor:pointer}
+  button.sec{background:transparent;color:var(--fg)}
+  button.danger{background:var(--bad)}
+  button:disabled{opacity:.55;cursor:wait}
+  input{font:inherit;width:100%;padding:8px 10px;border-radius:9px;border:1px solid var(--line);
+    background:var(--bg);color:var(--fg)}
+  .btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .field{display:grid;gap:5px;margin-bottom:9px}
+  .field label{font-size:12px;color:var(--dim)}
+  .inline{display:flex;gap:8px;align-items:center}
+  pre{margin:8px 0 0;max-height:220px;overflow:auto;font-size:12px;line-height:1.45;white-space:pre-wrap;
+    overflow-wrap:anywhere;color:var(--dim)}
+  code{font-size:12px;overflow-wrap:anywhere}
+  #msg{margin:10px 14px 0;padding:9px 12px;border-radius:10px;border:1px solid var(--line);display:none;white-space:pre-wrap}
+  #msg.ok{display:block;border-color:#1f6f3f;color:var(--ok)}
+  #msg.err{display:block;border-color:#6e2b2b;color:var(--bad)}
+  .muted{color:var(--dim);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>手机数据服务</h1>
+  <span id="pill" class="pill off">读取中…</span>
+  <span id="ver" class="pill">v-</span>
+  <span class="spacer"></span>
+  <span id="addr" class="muted"></span>
+</header>
+<div id="msg"></div>
+<main>
+  <div class="grid">
+    <section>
+      <h2>电量</h2>
+      <div id="bat-pct" class="big">–</div>
+      <div id="bat-sub" class="muted">–</div>
+      <div class="bar"><i id="bat-bar"></i></div>
+      <div id="bat-rows"></div>
+    </section>
+    <section>
+      <h2>处理器</h2>
+      <div id="cpu-usage" class="big">–</div>
+      <div id="cpu-sub" class="muted">–</div>
+      <div id="cpu-cores" class="cores"></div>
+      <div id="cpu-rows"></div>
+    </section>
+    <section>
+      <h2>内存</h2>
+      <div id="mem-used" class="big">–</div>
+      <div class="bar"><i id="mem-bar"></i></div>
+      <div id="mem-rows"></div>
+    </section>
+    <section>
+      <h2>温度</h2>
+      <div id="th-max" class="big">–</div>
+      <div id="th-sub" class="muted">–</div>
+      <div id="th-rows"></div>
+    </section>
+    <section>
+      <h2>Wi-Fi</h2>
+      <div id="wifi-sig" class="big">–</div>
+      <div id="wifi-sub" class="muted">–</div>
+      <div id="wifi-rows"></div>
+    </section>
+    <section>
+      <h2>网络</h2>
+      <div id="net-rows"></div>
+    </section>
+    <section>
+      <h2>存储</h2>
+      <div id="sto-rows"></div>
+    </section>
+    <section>
+      <h2>图形 / 系统</h2>
+      <div id="sys-rows"></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section>
+      <h2>服务控制</h2>
+      <div id="svc-rows"></div>
+      <div class="btns" style="margin-top:9px">
+        <button id="btn-restart">重启服务</button>
+        <button id="btn-stop" class="sec">停止</button>
+        <button id="btn-start" class="sec">启动</button>
+        <button id="btn-logs" class="sec">查看日志</button>
+      </div>
+      <div class="field" style="margin-top:11px">
+        <label for="port">监听端口（切换后服务自动重启）</label>
+        <div class="inline">
+          <input id="port" inputmode="numeric" placeholder="8080">
+          <button id="btn-port" class="sec" style="min-width:76px">切换</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>云端推送</h2>
+      <div id="push-rows"></div>
+      <div class="field" style="margin-top:9px">
+        <label for="push-url">接收地址（POST，http/https）</label>
+        <input id="push-url" placeholder="https://your-server/ingest" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="push-iv">间隔秒数（最短 10）</label>
+        <input id="push-iv" inputmode="numeric" placeholder="60">
+      </div>
+      <div class="field">
+        <label for="push-bear">Bearer 密钥（可选）</label>
+        <input id="push-bear" placeholder="留空表示不带 Authorization" autocomplete="off">
+      </div>
+      <div class="inline" style="margin-bottom:9px">
+        <input id="push-en" type="checkbox" style="width:auto;min-height:auto">
+        <label for="push-en" class="muted">启用定时推送</label>
+      </div>
+      <div class="btns">
+        <button id="btn-save-push">保存推送设置</button>
+        <button id="btn-push-now" class="sec">立即推送一次</button>
+        <button id="btn-load-cfg" class="sec" style="grid-column:1/-1">从配置重新读取</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>API 令牌</h2>
+      <div class="inline">
+        <input id="token" readonly>
+        <button id="btn-token" class="sec" style="min-width:76px">显示</button>
+      </div>
+      <div class="btns" style="margin-top:9px">
+        <button id="btn-copy" class="sec" style="grid-column:1/-1">复制令牌</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0">
+        也可以用浏览器打开 <code id="api-url">http://127.0.0.1:8080</code>，
+        接口在 <code>/api/v1/*</code>，全部只读；跨设备的调用需要在请求头带
+        <code>X-API-Key</code>。
+      </p>
+    </section>
+
+    <section>
+      <h2>日志</h2>
+      <div class="btns">
+        <button id="btn-log-refresh" class="sec">刷新日志</button>
+        <button id="btn-log-clear" class="danger">清空日志</button>
+      </div>
+      <pre id="log">按「查看日志」或「刷新日志」读取。</pre>
+    </section>
+  </div>
+  <p class="muted" id="foot"></p>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var BACKEND = '/data/adb/modules/phoneserver/webui.sh';
+  var REFRESH_MS = 3000;
+  var cbSeq = 0;
+  var busy = false;
+  var pushFormTouched = false;
+
+  /* ---- KernelSU bridge: window.ksu.exec(cmd, optsJSON, callbackName) ---- */
+  function sh(cmd) {
+    return new Promise(function (resolve) {
+      if (!window.ksu || typeof window.ksu.exec !== 'function') {
+        resolve({ errno: -1, stdout: '', stderr: 'NO_BRIDGE' });
+        return;
+      }
+      var name = 'psCb_' + Date.now() + '_' + (cbSeq++);
+      var settled = false;
+      window[name] = function (errno, stdout, stderr) {
+        if (settled) return;
+        settled = true;
+        delete window[name];
+        resolve({ errno: Number(errno), stdout: stdout || '', stderr: stderr || '' });
+      };
+      try {
+        window.ksu.exec(cmd, '{}', name);
+      } catch (e) {
+        settled = true;
+        delete window[name];
+        resolve({ errno: -1, stdout: '', stderr: String(e) });
+      }
+      setTimeout(function () {
+        if (!settled) {
+          settled = true;
+          delete window[name];
+          resolve({ errno: -2, stdout: '', stderr: 'timeout' });
+        }
+      }, 25000);
+    });
+  }
+
+  /* POSIX single-quote escaping, so user input can never break out of the arg. */
+  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+  /* Run the backend through `sh` rather than as a bare executable: a module
+     script's exec bit is not guaranteed to survive installation (the installer
+     re-applies file modes), and a shell invocation does not need it. */
+  function run(sub) { return sh('sh ' + shq(BACKEND) + ' ' + sub); }
+
+  function json(out) {
+    try { return JSON.parse(out); } catch (e) { return null; }
+  }
+
+  function el(id) { return document.getElementById(id); }
+
+  function rows(target, list) {
+    var h = '';
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      if (r === null || r === undefined) continue;
+      h += '<div class="row"><span>' + r[0] + '</span><span' +
+           (r[2] ? ' class="' + r[2] + '"' : '') + '>' + r[1] + '</span></div>';
+    }
+    el(target).innerHTML = h;
+  }
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'], i = 0;
+    while (n >= 1024 && i < 4) { n /= 1024; i++; }
+    return (n < 10 ? n.toFixed(2) : n.toFixed(1)) + u[i];
+  }
+
+  /* The kernel reports 0 for time-to-full / time-to-empty when it has no
+     estimate, so 0 means "unknown" — showing "0 分" would be a lie. */
+  function fmtDur(sec) {
+    if (!isFinite(sec) || !(Number(sec) > 0)) return '–';
+    var d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    return (d ? d + ' 天 ' : '') + h + ' 时 ' + m + ' 分';
+  }
+
+  /* Heat colouring: this phone idles in the 30s and throttles north of 70. */
+  function heat(t) { return t >= 70 ? 'bad' : t >= 50 ? 'warn' : 'ok'; }
+  function heatClass(t) { return t >= 70 ? 'bad' : t >= 50 ? 'warn' : 'ok'; }
+
+  /* The kernel reports these strings in English; translate at the presentation
+     layer only, so the JSON API stays faithful to what the kernel said. */
+  var ZH_STATUS = { 'Charging': '充电中', 'Discharging': '放电中', 'Full': '已充满',
+                    'Not charging': '未充电', 'Unknown': '未知' };
+  var ZH_HEALTH = { 'Good': '良好', 'Overheat': '过热', 'Dead': '已损坏', 'Over voltage': '电压过高',
+                    'Over current': '电流过大', 'Cold': '温度过低',
+                    'Unspecified failure': '未指定故障', 'Unknown': '未知' };
+  var ZH_SELINUX = { 'Enforcing': '强制模式', 'Permissive': '宽容模式',
+                     'disabled': '已关闭', 'unknown': '未知' };
+  function zh(map, v) { return map[v] || v || '–'; }
+
+  var HEAT_CSS = '.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}';
+  var style = document.createElement('style');
+  style.textContent = HEAT_CSS;
+  document.head.appendChild(style);
+
+  function flash(text, isErr) {
+    var m = el('msg');
+    if (!text) { m.style.display = 'none'; m.className = ''; return; }
+    m.className = isErr ? 'err' : 'ok';
+    m.textContent = text;
+    clearTimeout(flash._t);
+    flash._t = setTimeout(function () { m.style.display = 'none'; m.className = ''; }, isErr ? 9000 : 4500);
+  }
+
+  function describe(res) {
+    var body = json(res.stdout);
+    if (body && body.error) return { text: body.error, err: true };
+    if (body && body.ok === false) return { text: JSON.stringify(body).slice(0, 400), err: true };
+    if (res.errno !== 0 && res.stdout) return { text: res.stdout.slice(0, 400), err: false };
+    if (res.errno !== 0 && !res.stdout) return { text: res.stderr || '执行失败', err: true };
+    return { text: res.stdout ? res.stdout.slice(0, 400) : '完成', err: false };
+  }
+
+  /* ------------------------------ rendering ------------------------------ */
+
+  function drawStatus(st) {
+    var pill = el('pill');
+    pill.textContent = st.running ? '运行中' : '已停止';
+    pill.className = 'pill ' + (st.running ? 'on' : 'off');
+    el('ver').textContent = 'v' + st.version;
+    el('addr').textContent = st.running
+      ? 'http://' + (st.lan_ip || '127.0.0.1') + ':' + st.port
+      : '端口 ' + st.port;
+
+    rows('svc-rows', [
+      ['进程 PID', st.running ? st.pid : '—'],
+      ['看门狗 PID', st.watchdog_pid || '—'],
+      ['监听', st.listen],
+      ['局域网地址', st.lan_ip || '— 无 Wi-Fi'],
+      ['配置', st.config_path]
+    ]);
+
+    if (!el('port').dataset.touched) el('port').value = st.port;
+
+    var p = st.push;
+    var last = st.last_push;
+    var lastLine = '尚无记录';
+    if (last && last.last_attempt) {
+      lastLine = (last.ok ? '成功 HTTP ' + (last.http_status || '') + ' · ' + last.bytes_sent + 'B · ' + last.duration_ms + 'ms'
+                          : '失败：' + (last.last_error || '').slice(0, 90));
+    }
+    rows('push-rows', [
+      ['状态', p.enabled && p.url ? '已启用' : '未启用', p.enabled && p.url ? 'ok' : 'warn'],
+      ['地址', p.url || '（未设置）'],
+      ['间隔', p.interval_seconds + ' 秒'],
+      ['Bearer', p.bearer_set ? '已设置' : '未设置'],
+      ['上次推送', lastLine],
+      ['成功 / 失败', last && last.success_count !== undefined ? (last.success_count + ' / ' + last.failure_count) : '–']
+    ]);
+
+    if (!pushFormTouched) {
+      el('push-url').value = p.url || '';
+      el('push-iv').value = p.interval_seconds || 60;
+      el('push-en').checked = !!p.enabled;
+    }
+    el('api-url').textContent = 'http://' + (st.lan_ip || '127.0.0.1') + ':' + st.port;
+  }
+
+  function drawData(d) {
+    if (!d || d.error) {
+      el('bat-pct').textContent = '–';
+      el('bat-sub').textContent = d && d.error ? d.error : '暂无数据';
+      ['bat-rows', 'cpu-rows', 'mem-rows', 'th-rows', 'wifi-rows', 'net-rows', 'sto-rows', 'sys-rows']
+        .forEach(function (id) { el(id).innerHTML = ''; });
+      el('cpu-cores').innerHTML = '';
+      return;
+    }
+
+    /* battery */
+    var b = d.battery || {};
+    el('bat-pct').textContent = b.capacity_percent + '%';
+    el('bat-sub').textContent = zh(ZH_STATUS, b.status) + ' · ' + zh(ZH_HEALTH, b.health) +
+      ' · ' + b.temp_c + ' °C';
+    el('bat-bar').style.width = Math.max(0, Math.min(100, b.capacity_percent || 0)) + '%';
+    /* Whether external power is actually connected, straight from the charger
+       node — this is what explains "放电中" on a phone that looks plugged in. */
+    var usb = (d.power || {}).usb || null;
+    var powered = !!(usb && usb.online);
+    var inPower = powered
+      ? '已接入 ' + (usb.voltage_now_v != null ? usb.voltage_now_v + ' V' : '') +
+        (usb.current_now_a != null ? ' / ' + Math.abs(usb.current_now_a) + ' A' : '')
+      : '未接入电源';
+    rows('bat-rows', [
+      ['充电输入', inPower, powered ? 'ok' : 'warn'],
+      ['温度', b.temp_c + ' °C', heatClass(b.temp_c)],
+      ['循环次数', b.cycle_count],
+      ['健康度', b.health_percent + ' %', b.health_percent < 80 ? 'warn' : 'ok'],
+      ['满充 / 设计', b.charge_full_mah + ' / ' + b.charge_full_design_mah + ' mAh'],
+      ['充电次数', b.cycle_count + ' 次'],
+      ['电流', b.current_now_a + ' A'],
+      ['电压', b.voltage_v + ' V'],
+      ['充到满', fmtDur(b.time_to_full_seconds)],
+      ['用到空', fmtDur(b.time_to_empty_seconds)]
+    ]);
+
+    /* cpu */
+    var c = d.cpu || {};
+    el('cpu-usage').textContent = (c.usage_percent || 0) + '%';
+    el('cpu-sub').textContent = (c.core_count || 0) + ' 核 · ' + (c.model || '') +
+      (c.sample_interval_ms ? ' · 采样 ' + c.sample_interval_ms + 'ms' : '');
+    var cores = c.per_core_percent || [];
+    var h = '';
+    for (var i = 0; i < cores.length; i++) {
+      h += '<div class="core"><i style="height:' + Math.max(2, Math.min(100, cores[i])) + '%"></i><b>' + i + '</b></div>';
+    }
+    el('cpu-cores').innerHTML = h;
+    var freqs = (c.cores || []).map(function (x) { return Math.round(x.cur_khz / 1000); });
+    rows('cpu-rows', [
+      ['频率 MHz', freqs.join(' / ')],
+      ['调度器', (c.cores && c.cores[0] && c.cores[0].governor) || '–'],
+      ['负载', (c.load_avg || []).join(' ')],
+      ['开机时长', fmtDur(c.uptime_seconds)]
+    ]);
+
+    /* memory */
+    var m = d.memory || {};
+    el('mem-used').textContent = (m.used_percent || 0) + '%';
+    el('mem-bar').style.width = (m.used_percent || 0) + '%';
+    rows('mem-rows', [
+      ['总量', fmtBytes(m.total_kb * 1024)],
+      ['可用', fmtBytes(m.available_kb * 1024)],
+      ['空闲', fmtBytes(m.free_kb * 1024)],
+      ['缓存', fmtBytes(m.cached_kb * 1024)],
+      ['Swap 已用 / 总量', fmtBytes((m.swap_total_kb - m.swap_free_kb) * 1024) + ' / ' + fmtBytes(m.swap_total_kb * 1024)]
+    ]);
+
+    /* thermal */
+    var th = d.thermal || {};
+    el('th-max').textContent = th.max_temp_c + ' °C';
+    el('th-max').className = 'big ' + heatClass(th.max_temp_c);
+    var nth = (th.non_temperature_zones || []).length;
+    var tcount = th.temperature_zone_count != null ? th.temperature_zone_count : (th.zones || []).length;
+    el('th-sub').textContent = '最高热区：' + (th.hottest_zone || '–') + ' · ' + tcount + ' 个温度区' +
+      (nth ? '（另有 ' + nth + ' 个非温度项已排除：电流/电压档位）' : '');
+    rows('th-rows', (th.zones || []).slice(0, 7).map(function (z) {
+      return [z.type || z.name, z.temp_c + ' °C', heatClass(z.temp_c)];
+    }));
+
+    /* wifi */
+    var w = d.wifi || {};
+    el('wifi-sig').textContent = w.connected ? (w.signal_percent || 0) + '%' : '未连接';
+    el('wifi-sub').textContent = w.ssid || (w.error ? '读取失败' : '—');
+    rows('wifi-rows', [
+      ['RSSI', (w.rssi_dbm || 0) + ' dBm', w.rssi_dbm > -60 ? 'ok' : w.rssi_dbm > -70 ? 'warn' : 'bad'],
+      ['协商速率', w.link_speed_mbps + ' Mbps'],
+      ['频率 / 信道', w.frequency_mhz + ' MHz · ' + (w.band || '') + ' ch' + (w.channel || '–')],
+      ['协议 / 加密', (w.standard || '–') + ' · type ' + (w.security_type || 0)],
+      ['IP', w.ipv4 || '–'],
+      ['收 / 发 包', (w.rx_packets || 0) + ' / ' + (w.tx_packets || 0)],
+      ['发送重试 / 丢弃', (w.tx_retries || 0) + ' / ' + (w.tx_lost || 0)]
+    ]);
+
+    /* network */
+    var n = d.network || {};
+    var netRows = [
+      ['实时下行', fmtBytes(n.total_rx_bytes_per_sec) + '/s', 'ok'],
+      ['实时上行', fmtBytes(n.total_tx_bytes_per_sec) + '/s', 'ok'],
+      ['累计下行', fmtBytes(n.total_rx_bytes)],
+      ['累计上行', fmtBytes(n.total_tx_bytes)]
+    ];
+    (n.interfaces || []).forEach(function (it) {
+      if (it.name === 'lo' || !it.rx_bytes) return;
+      netRows.push([it.name, (it.ipv4 || []).join(',') || it.mac || '–']);
+    });
+    rows('net-rows', netRows);
+
+    /* storage */
+    rows('sto-rows', (d.storage || []).map(function (s) {
+      if (s.error) return [s.mount, s.error, 'bad'];
+      return [s.mount, fmtBytes(s.free_bytes) + ' 可用 / ' + fmtBytes(s.total_bytes) +
+        ' （已用 ' + s.used_percent + '%）' + (s.writable ? '' : ' 只读')];
+    }));
+
+    /* gpu + system + packages */
+    var g = d.gpu || {}, sy = d.system || {}, pk = d.packages || {}, pr = d.processes || {};
+    var risen = d.device ? (d.device.market_name || d.device.model) : '';
+    rows('sys-rows', [
+      ['GPU 占用', (g.busy_percent || 0) + '%'],
+      ['GPU 频率', Math.round((g.current_hz || 0) / 1e6) + ' / ' + Math.round((g.max_hz || 0) / 1e6) + ' MHz'],
+      ['GPU 温度', g.temp_c + ' °C', heatClass(g.temp_c)],
+      ['SELinux', zh(ZH_SELINUX, sy.selinux_mode)],
+      ['进程数', pr.count || 0],
+      ['安装包', (pk.total || 0) + '（系统 ' + (pk.system || 0) + ' / 用户 ' + (pk.user || 0) + '）'],
+      ['时区', (sy.timezone_name || '') + ' ' + (sy.timezone || '')],
+      ['机型', risen]
+    ]);
+  }
+
+  /* -------------------------------- refresh ------------------------------- */
+
+  function refresh() {
+    if (busy) return Promise.resolve();
+    return run('snapshot').then(function (res) {
+      if (res.errno === -1 && res.stderr === 'NO_BRIDGE') {
+        el('pill').textContent = '缺少 KernelSU 桥';
+        el('pill').className = 'pill off';
+        flash('这个页面必须在 KernelSU 管理器里通过模块的 WebUI 按钮打开，页面需要 window.ksu 才能执行命令。', true);
+        return;
+      }
+      var j = json(res.stdout);
+      if (!j) {
+        flash('后端返回无法解析的内容：' + (res.stdout || res.stderr).slice(0, 200), true);
+        return;
+      }
+      drawStatus(j.status || {});
+      drawData(j.data || {});
+    });
+  }
+
+  function act(sub, label) {
+    busy = true;
+    flash(label + ' …');
+    return run(sub).then(function (res) {
+      var d = describe(res);
+      flash(label + '：' + d.text, d.err);
+      return res;
+    }).catch(function (e) {
+      flash(label + '失败：' + e, true);
+    }).then(function () {
+      busy = false;
+      return refresh();
+    });
+  }
+
+  /* -------------------------------- wiring -------------------------------- */
+
+  el('btn-restart').onclick = function () { act('restart', '重启服务'); };
+  el('btn-stop').onclick = function () { act('stop', '停止服务'); };
+  el('btn-start').onclick = function () { act('start', '启动服务'); };
+  el('btn-logs').onclick = function () {
+    busy = true;
+    run('logs 60').then(function (res) {
+      el('log').textContent = res.stdout || res.stderr || '(空)';
+      busy = false;
+    });
+  };
+  el('btn-log-refresh').onclick = function () { el('btn-logs').click(); };
+  el('btn-log-clear').onclick = function () { act('clear-logs', '清空日志'); };
+
+  el('btn-port').onclick = function () {
+    var v = el('port').value.trim();
+    if (!/^[0-9]{4,5}$/.test(v)) { flash('端口需要是 1024-65535 之间的数字', true); return; }
+    act('set-port ' + shq(v), '切换端口到 ' + v);
+  };
+  el('port').addEventListener('input', function () { el('port').dataset.touched = '1'; });
+
+  ['push-url', 'push-iv', 'push-bear', 'push-en'].forEach(function (id) {
+    el(id).addEventListener('input', function () { pushFormTouched = true; });
+    el(id).addEventListener('change', function () { pushFormTouched = true; });
+  });
+
+  el('btn-save-push').onclick = function () {
+    var url = el('push-url').value.trim();
+    var iv = el('push-iv').value.trim() || '60';
+    var bear = el('push-bear').value;
+    var en = el('push-en').checked ? '1' : '0';
+    if (en === '1' && !/^https?:\/\//.test(url)) {
+      flash('启用推送前请填写以 http:// 或 https:// 开头的地址', true);
+      return;
+    }
+    pushFormTouched = false;
+    act('set-push ' + shq(url) + ' ' + shq(iv) + ' ' + shq(bear) + ' ' + en, '保存推送设置')
+      .then(function () { el('push-bear').value = ''; });
+  };
+  el('btn-push-now').onclick = function () { act('push-now', '立即推送'); };
+  el('btn-load-cfg').onclick = function () { pushFormTouched = false; refresh(); };
+
+  var tokenShown = false;
+  el('btn-token').onclick = function () {
+    tokenShown = !tokenShown;
+    if (!tokenShown) { el('token').value = '••••••••••••••••'; el('btn-token').textContent = '显示'; return; }
+    run('token').then(function (res) {
+      el('token').value = (res.stdout || '').trim();
+      el('btn-token').textContent = '隐藏';
+    });
+  };
+  el('btn-copy').onclick = function () {
+    run('token').then(function (res) {
+      var t = (res.stdout || '').trim();
+      if (!t) { flash('读取令牌失败', true); return; }
+      var done = function () { flash('令牌已复制'); };
+      var fail = function () { flash('复制失败，请手动长按选中：' + t, true); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(done).catch(fail);
+      } else {
+        try {
+          el('token').value = t;
+          el('token').select();
+          document.execCommand('copy') ? done() : fail();
+        } catch (e) { fail(); }
+      }
+    });
+  };
+
+  el('foot').textContent = '数据每秒刷新（每 3 秒一次，仅调一次后端）。' +
+    '推送内容与浏览器仪表盘一致：/api/v1/all 的完整快照。';
+
+  /* Bootstrap: initial paint, then poll. Stop polling when hidden. */
+  el('token').value = '••••••••••••••••';
+  refresh();
+  setInterval(function () { if (!document.hidden) refresh(); }, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
