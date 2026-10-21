@@ -675,7 +675,9 @@
       if (!j || !j.lines) { el('h-logs').textContent = (j && j.error) || (res.stdout || res.stderr || '读取失败').slice(0, 300); return; }
       if (!j.lines.length) { el('h-logs').textContent = '(最近 1 小时' + (g ? '、包含 “' + g + '”' : '') + '没有日志)'; return; }
       el('h-logs').textContent = j.lines.map(function (l) {
-        return l.time + '  ' + l.level + '  ' + l.line.slice(19, 180);
+        /* the raw line starts with "YYYY/MM/DD HH:MM:SS.ffffff " (27 chars);
+           l.time already carries the timestamp, so skip it in the message. */
+        return l.time + '  ' + l.level + '  ' + l.line.slice(27, 200);
       }).join('\n');
     });
   }
