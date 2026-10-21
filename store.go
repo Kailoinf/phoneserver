@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // ---------- flattened sample row ----------
 
@@ -279,6 +280,11 @@ func openStore(path string, warnf func(string, ...any)) (*Store, error) {
 	}
 	// One connection: no SQLITE_BUSY dance, writes are tiny, reads are short.
 	db.SetMaxOpenConns(1)
+	// Keep the write-ahead log small: the default checkpoint threshold is 1000
+	// pages, so the WAL alone sat at ~2.5 MB between prune checkpoints.
+	if _, err := db.Exec(`PRAGMA wal_autocheckpoint=256`); err != nil {
+		return nil, fmt.Errorf("set wal_autocheckpoint: %w", err)
+	}
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 
@@ -328,9 +334,13 @@ func (s *Store) migrate() error {
 			ts_ms INTEGER NOT NULL,
 			level TEXT NOT NULL,
 			source TEXT NOT NULL,
-			line TEXT NOT NULL
+			line TEXT NOT NULL,
+			line_hash INTEGER NOT NULL DEFAULT 0
 		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_unique ON logs(ts_ms, line)`,
+		// Deduplicate on a 64-bit fingerprint, not on the text itself: indexing
+		// (ts_ms, line) stores a second copy of every line inside the index
+		// (measured: 241 KB of index for 163 KB of text).
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_unique ON logs(ts_ms, line_hash)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts_ms)`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts)`,
 	}
@@ -340,9 +350,94 @@ func (s *Store) migrate() error {
 		}
 	}
 	_ = schemaVersion // keep the version visible next to the migration list
+
+	// Migrations that SQL cannot express, run every start and cheap when done.
+	// 1. logs.line_hash. Adding the column twice fails harmlessly.
+	s.db.Exec(`ALTER TABLE logs ADD COLUMN line_hash INTEGER NOT NULL DEFAULT 0`)
+	if err := s.backfillLogHashes(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DROP INDEX IF EXISTS idx_logs_unique`); err != nil {
+		return fmt.Errorf("migrate: drop idx_logs_unique: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_unique ON logs(ts_ms, line_hash)`); err != nil {
+		return fmt.Errorf("migrate: recreate idx_logs_unique: %w", err)
+	}
+	// 2. Incremental auto-vacuum. Without it a DELETE only marks pages free, so
+	//    the file keeps its high-water mark forever and the reported size stops
+	//    describing the content. Switching requires one VACUUM.
+	var av int
+	if err := s.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&av); err == nil && av != 2 {
+		if _, err := s.db.Exec(`PRAGMA auto_vacuum=2`); err == nil {
+			if _, err := s.db.Exec(`VACUUM`); err != nil {
+				return fmt.Errorf("migrate: vacuum for auto_vacuum: %w", err)
+			}
+		}
+	}
+
 	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('schema',?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`, fmt.Sprint(schemaVersion))
 	return err
+}
+
+// lineHash is a stable 64-bit fingerprint of a log line. The deduplication
+// index keys on it so the index does not hold a second copy of the text.
+func lineHash(s string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	return int64(h.Sum64())
+}
+
+// backfillLogHashes fills line_hash for rows written before the column existed.
+// It is a no-op once every row has one. The rows are collected before the
+// updates start: with a single pooled connection, writing while a cursor is
+// still open would wait on itself.
+func (s *Store) backfillLogHashes() error {
+	var pending int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM logs WHERE line_hash IS NULL OR line_hash = 0`).Scan(&pending); err != nil {
+		return fmt.Errorf("migrate: count rows needing line_hash: %w", err)
+	}
+	if pending == 0 {
+		return nil
+	}
+	rows, err := s.db.Query(`SELECT id, line FROM logs WHERE line_hash IS NULL OR line_hash = 0`)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	var hashes []int64
+	for rows.Next() {
+		var id int64
+		var line string
+		if err := rows.Scan(&id, &line); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+		hashes = append(hashes, lineHash(line))
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	st, err := tx.Prepare(`UPDATE logs SET line_hash = ? WHERE id = ?`)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	for i, id := range ids {
+		if _, err := st.Exec(hashes[i], id); err != nil {
+			st.Close()
+			tx.Rollback()
+			return err
+		}
+	}
+	st.Close()
+	return tx.Commit()
 }
 
 func firstLine(s string) string {
@@ -386,7 +481,7 @@ func (s *Store) InsertSampleAndSnapshot(sm Sample, doc []byte) error {
 	}
 	if len(doc) > 0 {
 		var buf bytes.Buffer
-		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 		if _, err := zw.Write(doc); err == nil {
 			if err := zw.Close(); err == nil {
 				if _, err := tx.Exec(
@@ -403,7 +498,7 @@ func (s *Store) InsertSampleAndSnapshot(sm Sample, doc []byte) error {
 
 func (s *Store) InsertSnapshot(ts int64, doc []byte) (int, error) {
 	var buf bytes.Buffer
-	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+	zw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if _, err := zw.Write(doc); err != nil {
 		return 0, err
 	}
@@ -429,14 +524,14 @@ func (s *Store) insertLogRows(rows []logRow) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	st, err := tx.Prepare(`INSERT OR IGNORE INTO logs (ts_ms, level, source, line) VALUES (?,?,?,?)`)
+	st, err := tx.Prepare(`INSERT OR IGNORE INTO logs (ts_ms, level, source, line, line_hash) VALUES (?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return 0, err
 	}
 	n := 0
 	for _, r := range rows {
-		res, err := st.Exec(r.TsMS, r.Level, r.Source, r.Line)
+		res, err := st.Exec(r.TsMS, r.Level, r.Source, r.Line, lineHash(r.Line))
 		if err != nil {
 			continue
 		}
@@ -603,6 +698,9 @@ func (s *Store) Prune(now time.Time, h HistoryConfig) (PruneResult, error) {
 			s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 		}
 	}
+	// With incremental auto-vacuum this is what actually gives space back to
+	// the filesystem; without it the deletions would only mark pages free.
+	s.db.Exec(`PRAGMA incremental_vacuum`)
 	s.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`)
 	// Stat only after the checkpoint, otherwise the reported size ignores the
 	// WAL that is about to be folded back into the main file.

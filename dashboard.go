@@ -66,6 +66,22 @@ button:hover{border-color:var(--acc)}
     <div id="hsum" class="dim" style="margin-top:7px"></div>
     <div id="hstat"></div>
   </div>
+  <div class="card">
+    <h2>截图</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:9px">
+      <select id="sf"><option value="webp" selected>WebP</option><option value="jpeg">JPEG</option><option value="png">PNG</option></select>
+      <select id="sq">
+        <option value="60">质量 60 · 最小</option>
+        <option value="80" selected>质量 80 · 推荐</option>
+        <option value="90">质量 90 · 清晰</option>
+      </select>
+      <select id="ss"><option value="1" selected>原始尺寸</option><option value="0.5">缩小一半</option><option value="0.25">四分之一</option></select>
+      <button onclick="shot()">截图</button>
+      <button onclick="shotDownload()" id="sd" disabled>下载</button>
+    </div>
+    <div id="smeta" class="dim">按「截图」获取当前屏幕画面。只走 GET 接口，不写入历史数据库，也不参与云端推送。</div>
+    <img id="simg" alt="屏幕截图" style="display:none;max-width:100%;margin-top:9px;border:1px solid var(--line);border-radius:8px">
+  </div>
 </div>
 <footer style="padding:0 18px 24px"><div id="err"></div></footer>
 <script>
@@ -131,6 +147,26 @@ function render(s){
   $('#upd').textContent='updated '+new Date().toLocaleTimeString();
 }
 async function load(){try{$('#err').textContent='';const s=await api('/api/v1/all');render(s);}catch(e){$('#err').textContent=String(e.message||e);}}
+let shotURL=null,shotName='screenshot.webp';
+async function shot(){
+  const q=$('#sq').value,s=$('#ss').value,f=$('#sf').value;
+  $('#smeta').textContent='正在截图并编码…'; $('#sd').disabled=true;
+  try{
+    const r=await fetch('/api/v1/screenshot?format='+f+'&quality='+q+'&scale='+s,{headers:hdr()});
+    if(!r.ok){$('#smeta').textContent='截图失败：HTTP '+r.status+' '+await r.text();return;}
+    const b=await r.blob();
+    if(shotURL)URL.revokeObjectURL(shotURL);
+    shotURL=URL.createObjectURL(b); shotName='screenshot.'+f;
+    $('#simg').src=shotURL; $('#simg').style.display='block';
+    $('#sd').disabled=false;
+    const kb=n=>n<1024?n+' B':(n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(2)+' MB');
+    $('#smeta').textContent=r.headers.get('X-Screenshot-Size')+' · '+kb(b.size)+
+      '（原始 PNG '+kb(Number(r.headers.get('X-Screenshot-Source-Bytes'))||0)+'）· 采集 '+
+      (r.headers.get('X-Screenshot-Capture-Ms')||'?')+' ms · 编码 '+
+      (r.headers.get('X-Screenshot-Encode-Ms')||'?')+' ms · 未入库 / 未推送';
+  }catch(e){$('#smeta').textContent='截图失败：'+String(e.message||e);}
+}
+function shotDownload(){if(!shotURL)return;const a=document.createElement('a');a.href=shotURL;a.download=shotName;a.click();}
 async function pushNow(){try{const r=await api('/api/v1/push',{method:'POST'});$('#err').textContent='push: '+(r.ok?('ok #'+r.http_status):(r.last_error||'failed'));}catch(e){$('#err').textContent=String(e.message||e);}}
 $('#tok').value=localStorage.getItem('ps_tok')||'';
 

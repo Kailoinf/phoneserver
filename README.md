@@ -73,6 +73,7 @@ curl -H 'X-API-Key: <令牌>' http://192.168.1.50:8080/api/v1/all   # 全部数�
 | GET | `/api/v1/history/logs` | 查询库内日志（`grep`/`level`/`since`） |
 | GET | `/api/v1/history/snapshot` | 取回某个时刻的完整文档（可只取一段） |
 | GET | `/api/v1/history/stats` | 库大小、行数、增长速度、耗电估算 |
+| GET | `/api/v1/screenshot` | 当前屏幕画面，默认 WebP（**只在请求时产生、不入库、不推送**） |
 | POST | `/api/v1/history/prune` | 立刻执行保留策略 |
 
 读端点限定 GET，其他方法返回 405；除 `/api/v1/health` 外都需要令牌。
@@ -170,6 +171,42 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 把 `full_seconds` 调成 60：中间的 tick 只走**廉价路径**——只读 sysfs 和 /proc，不 spawn getprop/dumpsys/wifi 子进程；标量指标仍然每 10 秒一条。按实测的单次开销推算，每天 CPU 从 1261 秒降到约 270 秒（单核 1.46% → 0.31%）。库里每行都有 `full` 列标明这一行是完整采集还是廉价采集，绝不含糊。
 
     { "history": { "interval_seconds": 10, "full_seconds": 60 } }
+
+## 截图
+
+```bash
+curl -H "X-Api-Key: $TOKEN" -o shot.webp http://192.168.5.29:8080/api/v1/screenshot
+curl -H "X-Api-Key: $TOKEN" -o small.webp 'http://192.168.5.29:8080/api/v1/screenshot?quality=60&scale=0.5'
+curl -H "X-Api-Key: $TOKEN" 'http://192.168.5.29:8080/api/v1/screenshot?meta=1'   # 只看元数据
+```
+
+| 参数 | 说明 |
+|---|---|
+| `format` | `webp`（默认）/ `jpeg` / `png` |
+| `quality` | 1–100，默认 80（`png` 忽略） |
+| `scale` | 0.1–1，默认 1（原始尺寸） |
+| `display` | 指定 display id（默认主屏） |
+| `meta=1` | 返回 JSON 元数据，不返回图片 |
+| `base64=1` | 返回 JSON 并把图片内联为 base64（管理器 WebUI 用这个） |
+| `download=1` | 让浏览器直接另存 |
+
+**只在请求时产生画面。** 没有后台截图，不写入历史数据库，也不参与云端推送——推送载荷是遥测文档，里面没有任何图片字段（`push.go` 里 grep 不到 screenshot/image/base64）。响应也会明说：响应头 `X-Screenshot-Stored: false` / `X-Screenshot-Pushed: false`，JSON 里是 `"stored": false` / `"pushed": false`。
+
+实机实测（1280×2772，锁屏+壁纸这种有内容的画面）：
+
+| 请求 | 输出 | 相对原始 PNG | 采集 | 编码 |
+|---|---|---|---|---|
+| `quality=80`（默认） | **166 KB** | 3.5% | ~350 ms | ~340 ms |
+| `quality=70` | 93 KB | 1.9% | ~350 ms | ~350 ms |
+| `quality=60` | 67 KB | 1.4% | ~350 ms | ~300 ms |
+| `quality=60&scale=0.5` | 12 KB | 0.4%（640×1386） | ~350 ms | ~90 ms |
+| `format=jpeg&quality=85` | 438 KB | 9.1% | ~350 ms | ~160 ms |
+| `format=png` | 4.8 MB | 100%（原样透传） | ~370 ms | 0 |
+
+- 编码器是**纯 Go 的 WebP**（`github.com/KarpelesLab/gowebp`，无 CGO——这个二进制必须静态无 CGO 才能在 Android 上 exec）。无损 WebP 对截图没有意义（只比 PNG 略小、还慢 5 倍），所以默认是有损 VP8。同质量档下它比成熟的 libwebp 大约 40%，但相对 PNG 已经是 3.5%；比 JPEG 小 2.6 倍。
+- **刚从熄屏/息屏显示唤醒时**第一次采集可能要 2 秒多（显示要上电），之后约 350 ms。服务端 20 秒超时；同一时刻只允许一个采集，第二个请求得到 **429** 和 `Retry-After`。
+- **受保护的画面会全黑**：标了 `FLAG_SECURE` 的窗口（银行、部分视频、密码输入界面）由 SurfaceFlinger 直接返回黑帧——那是系统在保护内容，本模块不绕过。
+- 每次请求都会进访问日志，和其它端点一样。
 
 ## 管理器 WebUI
 

@@ -216,6 +216,32 @@
       </div>
       <pre id="h-logs">库内日志（最近 1 小时）会显示在这里。</pre>
     </section>
+
+    <section>
+      <h2>截图</h2>
+      <div class="inline" style="gap:8px;flex-wrap:wrap;margin-bottom:9px">
+        <select id="s-format" class="sel" style="min-width:92px">
+          <option value="webp" selected>WebP</option>
+          <option value="jpeg">JPEG</option>
+          <option value="png">PNG</option>
+        </select>
+        <select id="s-quality" class="sel" style="min-width:126px">
+          <option value="60">质量 60 · 最小</option>
+          <option value="80" selected>质量 80 · 推荐</option>
+          <option value="90">质量 90 · 清晰</option>
+        </select>
+        <select id="s-scale" class="sel" style="min-width:112px">
+          <option value="1" selected>原始尺寸</option>
+          <option value="0.5">缩小一半</option>
+          <option value="0.25">四分之一</option>
+        </select>
+        <button id="s-take">截图</button>
+        <button id="s-download" class="sec" disabled>下载</button>
+      </div>
+      <div id="s-meta" class="muted">按「截图」获取当前屏幕画面。只走 GET 接口，不写入历史数据库，也不参与云端推送。</div>
+      <img id="s-img" alt="屏幕截图" style="display:none;max-width:100%;margin-top:9px;
+        border:1px solid var(--line);border-radius:9px">
+    </section>
   </div>
 
   <p class="muted" id="foot"></p>
@@ -729,6 +755,38 @@
   }
 
   /* -------------------------------- wiring -------------------------------- */
+
+  var shot = null;
+  el('s-take').onclick = function () {
+    var q = el('s-quality').value, sc = el('s-scale').value, f = el('s-format').value;
+    el('s-take').disabled = true;
+    el('s-meta').textContent = '正在截图并编码…';
+    run('screenshot ' + q + ' ' + sc + ' ' + f).then(function (r) {
+      el('s-take').disabled = false;
+      var j = json(r.stdout);
+      if (!j || j.ok === false) {
+        el('s-meta').textContent = '截图失败：' + ((j && j.error) || r.stderr || '没有返回内容');
+        return;
+      }
+      shot = j;
+      el('s-img').src = 'data:' + j.mime + ';base64,' + j.data;
+      el('s-img').style.display = 'block';
+      el('s-download').disabled = false;
+      el('s-meta').textContent = j.width + '×' + j.height + ' · ' + fmtBytes(j.bytes) +
+        '（原始 PNG ' + fmtBytes(j.source_bytes) + '）· 采集 ' + j.capture_ms + ' ms · 编码 ' +
+        j.encode_ms + ' ms · 未入库 / 未推送';
+      el('s-download').disabled = false;
+    });
+  };
+  el('s-download').onclick = function () {
+    if (!shot) return;
+    var a = document.createElement('a');
+    a.href = 'data:' + shot.mime + ';base64,' + shot.data;
+    a.download = 'screenshot.' + shot.format;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
 
   el('btn-restart').onclick = function () { act('restart', '重启服务'); };
   el('btn-stop').onclick = function () { act('stop', '停止服务'); };

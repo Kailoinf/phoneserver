@@ -102,6 +102,35 @@ them.
 
 Read endpoints are GET-only (anything else is a 405) and require the token.
 
+## Screenshots
+
+```
+curl -H "X-Api-Key: $TOKEN" -o shot.webp http://<phone>:8080/api/v1/screenshot
+curl -H "X-Api-Key: $TOKEN" -o small.webp 'http://<phone>:8080/api/v1/screenshot?quality=60&scale=0.5'
+curl -H "X-Api-Key: $TOKEN" 'http://<phone>:8080/api/v1/screenshot?meta=1'
+```
+
+`format` = `webp` (default) / `jpeg` / `png`, `quality` = 1-100 (default 80),
+`scale` = 0.1-1, `display` = an explicit display id, `meta=1` for JSON metadata
+only, `base64=1` to get the image inline in that JSON, `download=1` to save it.
+
+A frame only exists while a request is being served: there is **no background
+capture, nothing is written to the history database, and nothing is pushed**. The
+push payload is the telemetry document and has no image field at all. The
+response states it too (`X-Screenshot-Stored` / `X-Screenshot-Pushed`, and
+`stored` / `pushed` in the JSON).
+
+Measured on this device (1280x2772): webp q80 **166 KB** (3.5% of the PNG),
+q70 93 KB, q60 67 KB, q60 + `scale=0.5` 12 KB, jpeg q85 438 KB, png 4.8 MB
+(passthrough). Capture ~350 ms (over 2 s if the display was asleep), encode
+150-360 ms. Encoding is pure Go (`github.com/KarpelesLab/gowebp`, no cgo - the
+binary has to stay cgo-free and static to exec on Android); lossless webp is
+pointless for screenshots, so the default is lossy VP8.
+
+Protected windows (`FLAG_SECURE`: banking apps, some video, password fields) come
+back as a black frame - SurfaceFlinger protects the content and this does not try
+to get around it. Requests are logged like any other endpoint.
+
 ## Pushing to your own server
 
     curl -X PUT -H 'X-API-Key: TOKEN' -H 'Content-Type: application/json' \

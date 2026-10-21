@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version    = "1.2.1"
+	version    = "1.3.0"
 	defaultCfg = "/data/adb/phoneserver/config.json"
 )
 
@@ -242,8 +242,11 @@ type App struct {
 	histSumWrite    atomic.Int64
 	histSumGap      atomic.Int64
 	histDiagN       atomic.Int64
-	started         time.Time
-	logf            *log.Logger
+	// shotMu serialises screenshot captures; a second request is told to retry
+	// rather than queueing another screencap behind the first.
+	shotMu  sync.Mutex
+	started time.Time
+	logf    *log.Logger
 }
 
 func (a *App) config() Config {
@@ -429,6 +432,7 @@ func (a *App) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 			{"method": "GET", "path": "/api/v1/thermal", "desc": "all thermal zones in Celsius"},
 			{"method": "GET", "path": "/api/v1/network", "desc": "interfaces, counters, live rates"},
 			{"method": "GET", "path": "/api/v1/network/wifi", "desc": "SSID, RSSI, link speed, freq, packet stats"},
+			{"method": "GET", "path": "/api/v1/screenshot", "desc": "current screen as webp (default), jpeg or png; ?quality= ?scale= ?display= ?meta=1 ?base64=1 ?download=1; never stored, never pushed"},
 			{"method": "GET", "path": "/api/v1/system", "desc": "uptime, kernel, selinux, loadavg"},
 			{"method": "GET", "path": "/api/v1/processes", "desc": "process count + top by RSS"},
 			{"method": "GET", "path": "/api/v1/packages", "desc": "installed package counts"},
@@ -692,6 +696,7 @@ func main() {
 	mux.HandleFunc("/api/v1/system", app.get(app.handleSystem))
 	mux.HandleFunc("/api/v1/processes", app.get(app.handleProcesses))
 	mux.HandleFunc("/api/v1/packages", app.get(app.handlePackages))
+	mux.HandleFunc("/api/v1/screenshot", app.get(app.handleScreenshot))
 	mux.HandleFunc("/api/v1/config", app.guard(app.dispatch(map[string]http.HandlerFunc{
 		http.MethodGet: app.handleGetConfig,
 		http.MethodPut: app.handlePutConfig,

@@ -285,6 +285,9 @@ cmd_clear_logs() {
 # history [metrics] [since] [n]    sample series, e.g. "battery_temp_c,cpu_usage_pct" -6h 240
 # history-logs [n] [grep] [since]  stored log lines
 # history-snapshot [ts] [section]  the full stored document nearest ts
+# screenshot [quality] [scale] [format]
+#   Capture the current screen as an image. GET only - it is never written to
+#   the history database and never included in a push. Defaults to webp q80.
 # history-prune                    run the retention policy now
 # history-panel [metric] [since]   {stats,series,logs} in one call (what the UI polls)
 hist_api() {  # hist_api <path-with-query>
@@ -298,6 +301,26 @@ hist_api() {  # hist_api <path-with-query>
 }
 
 cmd_history_stats() { hist_api "history/stats" ; }
+
+# Screenshots take longer than the 8 s the shared api() helper allows (the
+# capture alone can take a couple of seconds on a cold display), so they get
+# their own curl with a generous timeout.
+cmd_screenshot() {
+    Q=${1:-80}; SC=${2:-1}; F=${3:-webp}
+    case "$Q" in ''|*[!0-9]*) Q=80 ;; esac
+    case "$SC" in ''|*[!0-9.]*) SC=1 ;; esac
+    case "$F" in webp|jpeg|png) ;; *) F=webp ;; esac
+    [ -n "$(daemon_pid)" ] || { printf '{"ok":false,"error":"service is not running"}'; return 1; }
+    T=$(token)
+    [ -n "$T" ] || { printf '{"ok":false,"error":"config has no api_token"}'; return 1; }
+    OUT=$(curl -s --max-time 45 -H "X-Api-Key: $T" \
+        "http://$(api_host):$(port)/api/v1/screenshot?meta=1&base64=1&format=$F&quality=$Q&scale=$SC" 2>/dev/null)
+    if [ -z "$OUT" ]; then
+        printf '{"ok":false,"error":"no answer from the API on port %s"}' "$(port)"
+        return 1
+    fi
+    printf '%s' "$OUT"
+}
 cmd_history_metrics() { hist_api "history/metrics" ; }
 
 cmd_history() {
@@ -380,6 +403,7 @@ case "$SUB" in
     history-logs)     cmd_history_logs "$@" ;;
     history-snapshot) cmd_history_snapshot "$@" ;;
     history-prune)    cmd_history_prune ;;
+    screenshot)       cmd_screenshot "$@" ;;
     history-panel)    cmd_history_panel "$@" ;;
     token)      token; echo ;;
     *)          printf '{"error":"unknown subcommand: %s"}' "$(jesc "$SUB")"; exit 1 ;;
