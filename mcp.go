@@ -193,7 +193,7 @@ func errorResponse(id json.RawMessage, code int, msg string) *rpcResponse {
 // ---------- server ----------
 
 type mcpServer struct {
-	baseURL string     // REST base the tools call, e.g. http://127.0.0.1:8080
+	baseURL string // REST base the tools call, e.g. http://127.0.0.1:8080
 	cfgFn   func() Config
 	logf    func(string, ...any)
 }

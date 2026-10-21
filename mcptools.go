@@ -43,11 +43,11 @@ type mcpTool struct {
 
 	props     map[string]any
 	required  []string
-	fixedQ    url.Values       // query parameters always sent
-	fixedB    map[string]any   // body fields always sent (POST/PUT)
+	fixedQ    url.Values        // query parameters always sent
+	fixedB    map[string]any    // body fields always sent (POST/PUT)
 	rename    map[string]string // tool argument -> transport key
-	queryArgs map[string]bool  // arguments that go to the query string even on POST
-	pathArgs  []string         // arguments consumed into the path template
+	queryArgs map[string]bool   // arguments that go to the query string even on POST
+	pathArgs  []string          // arguments consumed into the path template
 	schema    map[string]any
 }
 
@@ -116,9 +116,9 @@ func (b *toolBuilder) need(names ...string) *toolBuilder {
 
 func (b *toolBuilder) ro() *toolBuilder { b.t.readOnly = true; return b }
 
-func (b *toolBuilder) q(k, v string) *toolBuilder  { b.t.fixedQ.Set(k, v); return b }
+func (b *toolBuilder) q(k, v string) *toolBuilder        { b.t.fixedQ.Set(k, v); return b }
 func (b *toolBuilder) body(k string, v any) *toolBuilder { b.t.fixedB[k] = v; return b }
-func (b *toolBuilder) ren(from, to string) *toolBuilder { b.t.rename[from] = to; return b }
+func (b *toolBuilder) ren(from, to string) *toolBuilder  { b.t.rename[from] = to; return b }
 
 func (b *toolBuilder) qarg(names ...string) *toolBuilder {
 	for _, n := range names {

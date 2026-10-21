@@ -709,13 +709,13 @@ func (a *App) handleAppsLaunch(w http.ResponseWriter, r *http.Request) {
 	}
 	after := a.windowState(ctx)
 	res := map[string]any{
-		"ok":                err == nil,
-		"am_args":           args,
-		"launch_ms":         launchMS,
-		"foreground_before": before,
-		"foreground_after":  after.ForegroundApp,
+		"ok":                 err == nil,
+		"am_args":            args,
+		"launch_ms":          launchMS,
+		"foreground_before":  before,
+		"foreground_after":   after.ForegroundApp,
 		"changed_foreground": after.ForegroundApp != before,
-		"window":            after,
+		"window":             after,
 	}
 	if err != nil {
 		res["error"] = firstLine(out)
@@ -808,9 +808,9 @@ func (a *App) handleControlScreen(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(400 * time.Millisecond)
 	after := a.collectDisplay()
 	res := map[string]any{
-		"ok":           err == nil,
-		"action":       action,
-		"keyevent":     used,
+		"ok":            err == nil,
+		"action":        action,
+		"keyevent":      used,
 		"screen_before": before,
 		"screen_after":  after.ScreenOn,
 		"wakefulness":   after.Wakefulness,
@@ -895,8 +895,8 @@ func (a *App) handleControlBrightness(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Value int `json:"value"` // absolute, in the panel's own range
-		Pct   int `json:"percent"`
+		Value int   `json:"value"` // absolute, in the panel's own range
+		Pct   int   `json:"percent"`
 		Auto  *bool `json:"auto"`
 	}
 	if err := readJSONBody(r, &body, 1<<12); err != nil {
@@ -1107,10 +1107,10 @@ func (a *App) handleControlClipboard(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleControlTTS(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text  string `json:"text"`
+		Text  string  `json:"text"`
 		Rate  float64 `json:"rate"`
 		Pitch float64 `json:"pitch"`
-		Lang  string `json:"lang"`
+		Lang  string  `json:"lang"`
 	}
 	if err := readJSONBody(r, &body, 1<<16); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1145,10 +1145,10 @@ func (a *App) handleControlTTS(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleControlIR(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		FreqHz   int    `json:"freq_hz"`
-		Pattern  string `json:"pattern"`
-		Repeat   int    `json:"repeat"`
-		FreqsOnly bool  `json:"frequencies"`
+		FreqHz    int    `json:"freq_hz"`
+		Pattern   string `json:"pattern"`
+		Repeat    int    `json:"repeat"`
+		FreqsOnly bool   `json:"frequencies"`
 	}
 	if err := readJSONBody(r, &body, 1<<14); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1242,7 +1242,7 @@ func (a *App) handleControlMedia(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleControlWifi(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		On *bool  `json:"on"`
+		On   *bool  `json:"on"`
 		SSID string `json:"ssid"`
 	}
 	if err := readJSONBody(r, &body, 1<<13); err != nil {
@@ -1385,12 +1385,12 @@ func (a *App) handleShell(w http.ResponseWriter, r *http.Request) {
 	_ = start
 	a.logf.Printf("shell: cmd=%q code=%d ms=%d bytes=%d", body.Cmd, code, ms, len(out))
 	res := map[string]any{
-		"ok":         err == nil && code == 0,
-		"cmd":        body.Cmd,
-		"exit_code":  code,
+		"ok":          err == nil && code == 0,
+		"cmd":         body.Cmd,
+		"exit_code":   code,
 		"duration_ms": ms,
-		"output":     out,
-		"truncated":  truncated,
+		"output":      out,
+		"truncated":   truncated,
 	}
 	if err != nil {
 		res["error"] = err.Error()

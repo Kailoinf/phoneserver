@@ -7,21 +7,21 @@
 // cadence, or whether a value was thrown away because it was impossible. Every
 // question below is answered by data this file writes and reads back:
 //
-//	1. credibility metadata  tick_gap_ms / mono_ms / tz_offset_min / flags /
-//	                         measured_cols / absent_cols / rejected_cols /
-//	                         source_version (schema v3, see store.go)
-//	2. value validation      a -1000 °C battery or a 250 % CPU reading is not
-//	                         stored: the column is NULLed and counted as
-//	                         rejected, so "impossible" never reads as "measured"
-//	3. counter regressions   a counter that goes backwards inside one boot is a
-//	                         glitch, not a measurement — except where the device
-//	                         proves otherwise (see chargeCounter handling)
-//	4. ts uniqueness         enforced by a UNIQUE index; duplicates are merged
-//	                         at migration time keeping the fuller row
-//	5. sampling holes        recorded as data (flags/gaps endpoints) so "no
-//	                         data" is distinguishable from "the value was 0"
-//	6. long-range queries    bucketed aggregation in SQL, plus a permanent
-//	                         hourly rollup that outlives the raw samples
+//  1. credibility metadata  tick_gap_ms / mono_ms / tz_offset_min / flags /
+//     measured_cols / absent_cols / rejected_cols /
+//     source_version (schema v3, see store.go)
+//  2. value validation      a -1000 °C battery or a 250 % CPU reading is not
+//     stored: the column is NULLed and counted as
+//     rejected, so "impossible" never reads as "measured"
+//  3. counter regressions   a counter that goes backwards inside one boot is a
+//     glitch, not a measurement — except where the device
+//     proves otherwise (see chargeCounter handling)
+//  4. ts uniqueness         enforced by a UNIQUE index; duplicates are merged
+//     at migration time keeping the fuller row
+//  5. sampling holes        recorded as data (flags/gaps endpoints) so "no
+//     data" is distinguishable from "the value was 0"
+//  6. long-range queries    bucketed aggregation in SQL, plus a permanent
+//     hourly rollup that outlives the raw samples
 //
 // Design rule for all of it: NULL means "not recorded", never "zero". A zero
 // that nobody measured is the most expensive kind of wrong value, because it
@@ -125,7 +125,7 @@ var sampleBounds = map[string]struct{ min, max float64 }{
 	"wifi_signal_pct":      {0, 100},
 	"gpu_busy_pct":         {0, 100},
 	"wifi_rssi_dbm":        {-120, 0},
-	"uptime_s":             {0, 1e9},   // ~31 years of uptime is the ceiling
+	"uptime_s":             {0, 1e9}, // ~31 years of uptime is the ceiling
 	"brightness":           {0, 1 << 20},
 	"brightness_max":       {0, 1 << 20},
 	"battery_voltage_v":    {0, 30},
@@ -490,26 +490,26 @@ type GapsResult struct {
 }
 
 type QualityReport struct {
-	Since             int64                  `json:"since"`
-	Until             int64                  `json:"until"`
-	IntervalSeconds   int                    `json:"interval_seconds"`
-	SchemaVersion     int                    `json:"schema_version"`
-	SchemaExpected    int                    `json:"schema_expected"`
-	MetricColumns     int                    `json:"metric_columns"`
-	Coverage          CoverageBlock          `json:"coverage"`
-	NullRatioTop      []ColumnCoverage       `json:"null_ratio_top"`
-	ColumnsWithNulls  int                    `json:"columns_with_nulls"`
-	RejectedByColumn  map[string]int64       `json:"rejected_by_column"`
-	RejectedRows      int64                  `json:"rejected_rows"`
-	Flags             FlagBlock              `json:"flags"`
-	LongestGaps       []GapRec               `json:"longest_gaps"`
-	GapsFound         int64                  `json:"gaps_found"`
-	DuplicateTS       int64                  `json:"duplicate_ts_rows"`
-	DedupedAtMigrate  int64                  `json:"deduped_rows_at_migration"`
-	CarriedColumns    []string               `json:"carried_columns"`
-	DB                map[string]any         `json:"db"`
-	Rollup            map[string]any         `json:"rollup"`
-	Notes             map[string]string      `json:"notes"`
+	Since            int64             `json:"since"`
+	Until            int64             `json:"until"`
+	IntervalSeconds  int               `json:"interval_seconds"`
+	SchemaVersion    int               `json:"schema_version"`
+	SchemaExpected   int               `json:"schema_expected"`
+	MetricColumns    int               `json:"metric_columns"`
+	Coverage         CoverageBlock     `json:"coverage"`
+	NullRatioTop     []ColumnCoverage  `json:"null_ratio_top"`
+	ColumnsWithNulls int               `json:"columns_with_nulls"`
+	RejectedByColumn map[string]int64  `json:"rejected_by_column"`
+	RejectedRows     int64             `json:"rejected_rows"`
+	Flags            FlagBlock         `json:"flags"`
+	LongestGaps      []GapRec          `json:"longest_gaps"`
+	GapsFound        int64             `json:"gaps_found"`
+	DuplicateTS      int64             `json:"duplicate_ts_rows"`
+	DedupedAtMigrate int64             `json:"deduped_rows_at_migration"`
+	CarriedColumns   []string          `json:"carried_columns"`
+	DB               map[string]any    `json:"db"`
+	Rollup           map[string]any    `json:"rollup"`
+	Notes            map[string]string `json:"notes"`
 }
 
 // QueryGaps returns the holes in the sampling cadence. The comparison is
@@ -615,8 +615,8 @@ func (s *Store) QueryQuality(since, until int64, topN int, h HistoryConfig) (*Qu
 		topN = len(sampleColumns)
 	}
 	rep := &QualityReport{Since: since, Until: until, IntervalSeconds: h.IntervalSeconds,
-		MetricColumns: metricColumnCount(),
-		SchemaExpected: schemaVersion,
+		MetricColumns:    metricColumnCount(),
+		SchemaExpected:   schemaVersion,
 		RejectedByColumn: map[string]int64{}, CarriedColumns: []string{},
 		DB: map[string]any{}, Rollup: map[string]any{},
 		Notes: map[string]string{}}

@@ -343,11 +343,11 @@ type streamEncoder struct {
 	display string
 	fpsHint int
 
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
-	done   chan struct{}
-	stdout io.ReadCloser
-	stderr *bytes.Buffer
+	cmd     *exec.Cmd
+	cancel  context.CancelFunc
+	done    chan struct{}
+	stdout  io.ReadCloser
+	stderr  *bytes.Buffer
 	started time.Time
 
 	splitter nalSplitter

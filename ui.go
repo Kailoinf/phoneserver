@@ -32,19 +32,19 @@ const uiDumpPath = "/data/local/tmp/phoneserver_ui.xml"
 
 // UIElement is one node of the hierarchy, flattened.
 type UIElement struct {
-	Index         int    `json:"index"`      // depth-first position in the tree
-	Depth         int    `json:"depth"`      //
-	Class         string `json:"class"`      //
-	Package       string `json:"package"`    //
-	Text          string `json:"text"`       //
-	Desc          string `json:"desc"`       // content-desc
-	ResourceID    string `json:"resource_id"`//
+	Index         int    `json:"index"`       // depth-first position in the tree
+	Depth         int    `json:"depth"`       //
+	Class         string `json:"class"`       //
+	Package       string `json:"package"`     //
+	Text          string `json:"text"`        //
+	Desc          string `json:"desc"`        // content-desc
+	ResourceID    string `json:"resource_id"` //
 	Hint          string `json:"hint,omitempty"`
-	Bounds        [4]int `json:"bounds"`     // left, top, right, bottom
-	Center        [2]int `json:"center"`     // click point
-	Width         int    `json:"width"`      //
-	Height        int    `json:"height"`     //
-	Clickable     bool   `json:"clickable"`  //
+	Bounds        [4]int `json:"bounds"`    // left, top, right, bottom
+	Center        [2]int `json:"center"`    // click point
+	Width         int    `json:"width"`     //
+	Height        int    `json:"height"`    //
+	Clickable     bool   `json:"clickable"` //
 	LongClickable bool   `json:"long_clickable"`
 	Scrollable    bool   `json:"scrollable"`
 	Checkable     bool   `json:"checkable"`
@@ -62,21 +62,21 @@ func (e UIElement) interesting() bool {
 }
 
 type uiDumpResult struct {
-	Elements  []UIElement `json:"elements"`
-	Total     int         `json:"total_nodes"`
-	Rotation  string      `json:"rotation"`
-	Package   string      `json:"package,omitempty"`
-	Warnings  []string    `json:"warnings,omitempty"`
-	DumpMS    int64       `json:"dump_ms"`
-	CachedAt  string      `json:"cached_at,omitempty"`
+	Elements []UIElement `json:"elements"`
+	Total    int         `json:"total_nodes"`
+	Rotation string      `json:"rotation"`
+	Package  string      `json:"package,omitempty"`
+	Warnings []string    `json:"warnings,omitempty"`
+	DumpMS   int64       `json:"dump_ms"`
+	CachedAt string      `json:"cached_at,omitempty"`
 }
 
 type uiCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	xml  []byte
-	ms   int64
-	err  string
+	mu  sync.Mutex
+	at  time.Time
+	xml []byte
+	ms  int64
+	err string
 }
 
 var uiCacheStore = uiCache{}
@@ -235,13 +235,13 @@ func parseUIHierarchy(raw []byte) (uiDumpResult, error) {
 // windowState is the cheap "what is on screen" answer that does not need
 // uiautomator at all.
 type windowState struct {
-	FocusedWindow  string `json:"focused_window"`
-	ForegroundApp  string `json:"foreground_app"`
-	TopActivity    string `json:"top_activity,omitempty"`
-	Keyguard       bool   `json:"keyguard_showing"`
-	ScreenOn       bool   `json:"screen_on"`
-	LayoutReady    bool   `json:"ui_automatable"`
-	Note           string `json:"note,omitempty"`
+	FocusedWindow string `json:"focused_window"`
+	ForegroundApp string `json:"foreground_app"`
+	TopActivity   string `json:"top_activity,omitempty"`
+	Keyguard      bool   `json:"keyguard_showing"`
+	ScreenOn      bool   `json:"screen_on"`
+	LayoutReady   bool   `json:"ui_automatable"`
+	Note          string `json:"note,omitempty"`
 }
 
 func (a *App) windowState(ctx context.Context) windowState {
@@ -391,22 +391,22 @@ func firstMatch(s, pat string) string {
 
 // uiQuery describes a text/desc/id search.
 type uiQuery struct {
-	Text      string `json:"text"`
-	Desc      string `json:"desc"`
+	Text       string `json:"text"`
+	Desc       string `json:"desc"`
 	ResourceID string `json:"resource_id"`
-	Class     string `json:"class"`
-	Contains  bool   `json:"contains"`
-	Clickable bool   `json:"clickable_only"`
+	Class      string `json:"class"`
+	Contains   bool   `json:"contains"`
+	Clickable  bool   `json:"clickable_only"`
 }
 
 func uiQueryFromValues(v map[string]string) uiQuery {
 	return uiQuery{
-		Text:      v["text"],
-		Desc:      v["desc"],
+		Text:       v["text"],
+		Desc:       v["desc"],
 		ResourceID: v["resource_id"],
-		Class:     v["class"],
-		Contains:  boolParam(v["contains"]) || boolParam(v["fuzzy"]),
-		Clickable: boolParam(v["clickable"]),
+		Class:      v["class"],
+		Contains:   boolParam(v["contains"]) || boolParam(v["fuzzy"]),
+		Clickable:  boolParam(v["clickable"]),
 	}
 }
 
@@ -491,12 +491,12 @@ func (a *App) handleUIFind(w http.ResponseWriter, r *http.Request) {
 		hits = hits[:1]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"query":        q,
-		"match_count":  len(hits),
-		"dump_ms":      res.DumpMS,
-		"total_nodes":  res.Total,
-		"matches":      hits,
-		"window":       a.windowState(ctx),
+		"query":       q,
+		"match_count": len(hits),
+		"dump_ms":     res.DumpMS,
+		"total_nodes": res.Total,
+		"matches":     hits,
+		"window":      a.windowState(ctx),
 	})
 }
 

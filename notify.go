@@ -33,31 +33,31 @@ import (
 
 // Notification is one posted notification, cleaned up.
 type Notification struct {
-	Key               string `json:"key"`
-	Package           string `json:"package"`
-	UID               int    `json:"uid,omitempty"`
-	User              string `json:"user,omitempty"`
-	ID                int    `json:"id,omitempty"`
-	Tag               string `json:"tag,omitempty"`
-	Channel           string `json:"channel,omitempty"`
-	Title             string `json:"title,omitempty"`
-	Text              string `json:"text,omitempty"`
-	BigText           string `json:"big_text,omitempty"`
-	Ticker            string `json:"ticker_text,omitempty"`
-	SubText           string `json:"sub_text,omitempty"`
-	WhenMS            int64  `json:"when_ms,omitempty"`
-	When              string `json:"when,omitempty"`
-	Ongoing           bool   `json:"ongoing"`
-	Clearable         bool   `json:"clearable"`
-	ForegroundService bool   `json:"foreground_service"`
-	GroupSummary      bool   `json:"group_summary"`
-	GroupKey          string `json:"group_key,omitempty"`
-	Importance        string `json:"importance,omitempty"`
-	Visibility        string `json:"visibility,omitempty"`
-	Flags             string `json:"flags,omitempty"`
-	Category          string `json:"category,omitempty"`
-	Progress          int    `json:"progress,omitempty"`
-	ProgressMax       int    `json:"progress_max,omitempty"`
+	Key               string   `json:"key"`
+	Package           string   `json:"package"`
+	UID               int      `json:"uid,omitempty"`
+	User              string   `json:"user,omitempty"`
+	ID                int      `json:"id,omitempty"`
+	Tag               string   `json:"tag,omitempty"`
+	Channel           string   `json:"channel,omitempty"`
+	Title             string   `json:"title,omitempty"`
+	Text              string   `json:"text,omitempty"`
+	BigText           string   `json:"big_text,omitempty"`
+	Ticker            string   `json:"ticker_text,omitempty"`
+	SubText           string   `json:"sub_text,omitempty"`
+	WhenMS            int64    `json:"when_ms,omitempty"`
+	When              string   `json:"when,omitempty"`
+	Ongoing           bool     `json:"ongoing"`
+	Clearable         bool     `json:"clearable"`
+	ForegroundService bool     `json:"foreground_service"`
+	GroupSummary      bool     `json:"group_summary"`
+	GroupKey          string   `json:"group_key,omitempty"`
+	Importance        string   `json:"importance,omitempty"`
+	Visibility        string   `json:"visibility,omitempty"`
+	Flags             string   `json:"flags,omitempty"`
+	Category          string   `json:"category,omitempty"`
+	Progress          int      `json:"progress,omitempty"`
+	ProgressMax       int      `json:"progress_max,omitempty"`
 	Actions           []string `json:"actions,omitempty"`
 	ParseIncomplete   bool     `json:"parse_incomplete,omitempty"`
 }
@@ -382,12 +382,12 @@ func (a *App) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		pkgs[n.Package]++
 	}
 	out := map[string]any{
-		"count":             len(picked),
+		"count":              len(picked),
 		"total_before_limit": total,
-		"ongoing_included":  includeOngoing,
-		"captured_at":       time.Now().Format(time.RFC3339),
-		"packages":          pkgs,
-		"notifications":     picked,
+		"ongoing_included":   includeOngoing,
+		"captured_at":        time.Now().Format(time.RFC3339),
+		"packages":           pkgs,
+		"notifications":      picked,
 	}
 	if incomplete > 0 {
 		out["parse_incomplete"] = incomplete
@@ -400,11 +400,11 @@ func (a *App) handleNotificationPost(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	var body struct {
-		Title string `json:"title"`
-		Text  string `json:"text"`
-		ID    string `json:"id"`
+		Title   string `json:"title"`
+		Text    string `json:"text"`
+		ID      string `json:"id"`
 		Channel string `json:"channel"`
-		Style string `json:"style"` // bigtext | inbox
+		Style   string `json:"style"` // bigtext | inbox
 	}
 	if err := readJSONBody(r, &body, 1<<14); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
