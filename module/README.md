@@ -139,6 +139,32 @@ MCP（给 AI agent）
                   http://127.0.0.1:8080/files/  文件浏览与上传
     token 在页面里填一次（存 localStorage），或浏览器弹 Basic 认证时把 token 当密码。
 
+WebUI 后端（webui.sh 子命令）
+----------------------------
+管理器里 WebUI 页面不直接读文件，而是通过 `sh <模块目录>/webui.sh <子命令>` 走 REST API。
+所有子命令都能在 adb 上单独验证：
+
+    status                给页面用的 JSON：version/running/pid/watchdog_pid/listen/port/lan_ip/token
+    health                服务存活与能力概览
+    get-config            当前配置（token 已脱敏）
+    set-config [json]     PUT 配置；不给参数就从 stdin 读 JSON（推荐，避免 token 出现在命令行里）
+    set-listen <host:port>  改监听地址；非 loopback 必须加 --yes 二次确认，改完自动重启并轮询 health
+    set-port <port>       只改端口（保持 127.0.0.1）
+    restart | start | stop  服务控制（restart 会轮询 /api/v1/health 确认真的起来了）
+    bridge-status | bridge-fix    Termux:API 桥状态 / 一键修复权限+唤醒锁+前台
+    stream-status        当前串流编码器的 fps/码率与屏幕状态
+    api <GET 路径>        任意 GET，例：api /api/v1/battery
+    api-post <路径> <base64 JSON>
+    ui-click <base64 文本> / input-text <base64 文本>
+    apps-list [匹配] | notifications [n] [--ongoing] | messages <sms|calls|contacts> [n]
+    camera-photo [--meta] | mic-record <秒数>
+    files-shares | files-list <share> <路径>
+    mcp-info              MCP 端点与 stdio 启动命令
+    history ... | history-stats | history-metrics | history-logs | history-snapshot | history-prune | history-panel
+    screenshot [--meta] | logs [n] | api-log [n] | clear-logs | token
+
+    写操作一律回读确认；连不上时区分「超时」与「没在监听」，不会假报 ok。
+
 故障速修
 --------
 相机/麦克风 503 或报 background:
