@@ -1,0 +1,23 @@
+{
+  "name": "phoneserver-webui",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "description": "phoneserver WebUI: multi-page Preact + Vite + TypeScript + Tailwind CSS v4 front end for the KernelSU WebView and for http://<host>:<port>/ui/",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^11.0.1"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.6",
+    "@tailwindcss/vite": "^4.3.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

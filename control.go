@@ -462,12 +462,22 @@ func (a *App) installedApps(ctx context.Context) ([]appInfo, error) {
 				continue
 			}
 			rest := strings.TrimPrefix(line, "package:")
+			// `pm list packages -f` prints package:<apk path>=<pkg>, and the path
+			// itself contains '=' (the base64-ish /data/app/~~xxx==/... segment), so
+			// splitting on the FIRST '=' produced package names like
+			// "=/bin.mt.plus-...==/base.apk=bin.mt.plus". Split on the last one,
+			// drop any trailing "uid:…" field, and refuse anything that still looks
+			// like a path.
+			if i := strings.IndexByte(rest, ' '); i >= 0 {
+				rest = rest[:i]
+			}
 			pkg := rest
 			path := ""
-			if i := strings.Index(rest, "="); i >= 0 {
+			if i := strings.LastIndex(rest, "="); i >= 0 {
 				path, pkg = rest[:i], rest[i+1:]
 			}
-			if pkg == "" {
+			pkg = strings.TrimSpace(pkg)
+			if pkg == "" || strings.ContainsAny(pkg, "/ ") {
 				continue
 			}
 			ai, ok := byPkg[pkg]

@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+/* The only global rule allowed by the style guide: hide the scrollbars. */
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+}
+* {
+  scrollbar-width: none;
+}
