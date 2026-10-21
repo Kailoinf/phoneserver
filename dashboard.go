@@ -190,6 +190,7 @@ async function loadHistory(){
       row('实测增长',st.bytes_per_day?fmtB(st.bytes_per_day)+' / 天（主库增量）':(st.growth_note||'–'))+
       row('预计填满上限',st.est_days_to_cap?Math.round(st.est_days_to_cap)+' 天':'–')+
       row('采集开销',(co.collections_per_day||0)+' 次/天 · 约 '+(co.cpu_seconds_per_day||0)+' 秒 CPU · '+(co.avg_cpu_percent_of_core||0)+'% 单核')+
+      row('循环耗时',(t.timing&&t.timing.ticks_measured)?('间隔 '+(t.timing.avg_gap_ms||0)+'ms · 采集 '+(t.timing.avg_collect_ms||0)+'ms · 写库 '+(t.timing.avg_write_ms||0)+'ms（均值）'):'（还没跑满一个周期）')+
       row('快照压缩比',st.compression_ratio?st.compression_ratio+'×':'–')+
       row('日志来源',srcs)+row('丢弃的日志行',st.dropped_log_lines||0)+
       row('上次写入错误',t.last_error||'无');

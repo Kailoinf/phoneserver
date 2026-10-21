@@ -113,7 +113,7 @@ type Sample struct {
 	PkgDisabled        int     `json:"pkg_disabled"`
 	Full               int     `json:"full"` // 1 when built from the full snapshot
 
-	CollectMS int64 `json:"collect_ms"` // wall time this row cost
+	CollectMS int64 `json:"collect_ms"` // wall time the collection cost
 }
 
 // sampleColumns mirrors the Sample struct field order exactly.
@@ -339,6 +339,7 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w (statement: %s)", err, firstLine(q))
 		}
 	}
+	_ = schemaVersion // keep the version visible next to the migration list
 	_, err := s.db.Exec(`INSERT INTO meta(k,v) VALUES('schema',?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`, fmt.Sprint(schemaVersion))
 	return err
@@ -365,6 +366,39 @@ func (s *Store) InsertSample(sm Sample) error {
 		strings.TrimSuffix(strings.Repeat("?,", len(sampleColumns)), ",") + ")"
 	_, err := s.db.Exec(q, sm.values()...)
 	return err
+}
+
+// InsertSampleAndSnapshot writes the sample row and (when doc is not empty)
+// the gzipped document in a single transaction. Two separate Execs mean two
+// COMMITs, and every COMMIT is an fsync on the phone's flash.
+func (s *Store) InsertSampleAndSnapshot(sm Sample, doc []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	q := "INSERT OR REPLACE INTO samples (" + strings.Join(sampleColumns, ",") + ") VALUES (" +
+		strings.TrimSuffix(strings.Repeat("?,", len(sampleColumns)), ",") + ")"
+	if _, err := tx.Exec(q, sm.values()...); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if len(doc) > 0 {
+		var buf bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&buf, gzip.BestSpeed)
+		if _, err := zw.Write(doc); err == nil {
+			if err := zw.Close(); err == nil {
+				if _, err := tx.Exec(
+					`INSERT OR REPLACE INTO snapshots (ts, doc, raw_bytes, gz_bytes) VALUES (?,?,?,?)`,
+					sm.Ts, buf.Bytes(), len(doc), buf.Len()); err != nil {
+					tx.Rollback()
+					return err
+				}
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) InsertSnapshot(ts int64, doc []byte) (int, error) {
@@ -421,7 +455,10 @@ func (s *Store) insertLogRows(rows []logRow) (int, error) {
 // transactions per second rather than one per line.
 func (s *Store) StartLogFlusher(warnf func(string, ...any)) {
 	go func() {
-		tick := time.NewTicker(400 * time.Millisecond)
+		// Each COMMIT is an fsync on the phone's flash. Flushing on every 400 ms
+		// tick with two or three rows means constant fsync churn, which competes
+		// with the sampling loop for the write lock; batching wider is cheaper.
+		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
 		batch := make([]logRow, 0, 256)
 		flush := func() {
@@ -440,7 +477,7 @@ func (s *Store) StartLogFlusher(warnf func(string, ...any)) {
 				return
 			case r := <-s.sink.ch:
 				batch = append(batch, r)
-				if len(batch) >= 256 {
+				if len(batch) >= 64 {
 					flush()
 				}
 			case <-tick.C:

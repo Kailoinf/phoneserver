@@ -700,6 +700,7 @@
         ' · 最大 ' + fmtVal((agg.max || {})[metric]) +
         ' · 最新 ' + fmtVal((agg.last || {})[metric]);
 
+      var tm = hc.timing || {};
       var srcs = st.logs_by_source ? Object.keys(st.logs_by_source).map(function (k) {
         return k + '×' + st.logs_by_source[k];
       }).join('  ') : '–';
@@ -715,6 +716,8 @@
         ['实测增长', st.bytes_per_day ? fmtBytes(st.bytes_per_day) + ' / 天（主库增量）' : (st.growth_note || '–')],
         ['预计填满上限', st.est_days_to_cap ? Math.round(st.est_days_to_cap) + ' 天' : '–'],
         ['每天采集次数', (cost.collections_per_day || 0) + ' 次 · 约 ' + (cost.cpu_seconds_per_day || 0) + ' 秒 CPU'],
+        ['循环耗时', tm.ticks_measured ? ('间隔 ' + (tm.avg_gap_ms || 0) + 'ms · 采集 ' +
+          (tm.avg_collect_ms || 0) + 'ms · 写库 ' + (tm.avg_write_ms || 0) + 'ms（均值）') : '（还没跑满一个周期）'],
         ['平均 CPU 占用', (cost.avg_cpu_percent_of_core || 0) + '% 单核'],
         ['快照压缩比', st.compression_ratio ? st.compression_ratio + '×' : '–'],
         ['日志来源', srcs],

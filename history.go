@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 )
 
@@ -342,6 +343,7 @@ func (a *App) collectCheapSample(ts int64) Sample {
 // config each round so interval/retention changes apply without a restart.
 func (a *App) startHistoryLoop(logger *log.Logger, stop <-chan struct{}) {
 	lastFull := time.Time{}
+	lastTick := time.Time{}
 	failures := 0
 	for {
 		h := a.config().History.norm()
@@ -364,15 +366,13 @@ func (a *App) startHistoryLoop(logger *log.Logger, stop <-chan struct{}) {
 			time.Since(lastFull) >= time.Duration(h.FullSeconds)*time.Second-time.Second
 		start := time.Now()
 		ts := start.Unix()
-
 		var sm Sample
+		var doc []byte
 		if full {
 			snap := a.snapshot()
 			sm = sampleFromSnapshot(snap, 1, ts)
 			if body, err := json.Marshal(snap); err == nil {
-				if _, err := a.store.InsertSnapshot(ts, body); err != nil {
-					a.histErrf.Store(err.Error())
-				}
+				doc = body
 			}
 			lastFull = start
 			a.histFulls.Add(1)
@@ -380,7 +380,24 @@ func (a *App) startHistoryLoop(logger *log.Logger, stop <-chan struct{}) {
 			sm = a.collectCheapSample(ts)
 		}
 		sm.CollectMS = time.Since(start).Milliseconds()
-		if err := a.store.InsertSample(sm); err != nil {
+
+		wstart := time.Now()
+		err := a.store.InsertSampleAndSnapshot(sm, doc)
+		writeMS := time.Since(wstart).Milliseconds()
+
+		a.histLastCollect.Store(sm.CollectMS)
+		a.histLastWrite.Store(writeMS)
+		a.histSumCollect.Add(sm.CollectMS)
+		a.histSumWrite.Add(writeMS)
+		if !lastTick.IsZero() {
+			gapMS := start.Sub(lastTick).Milliseconds()
+			a.histLastGap.Store(gapMS)
+			a.histSumGap.Add(gapMS)
+		}
+		lastTick = start
+		a.histDiagN.Add(1)
+
+		if err != nil {
 			failures++
 			a.histErrf.Store(err.Error())
 			if failures == 1 || failures%30 == 0 {
@@ -412,8 +429,30 @@ type historyStatus struct {
 	FullSeconds     int            `json:"full_seconds"`
 	LastError       string         `json:"last_error,omitempty"`
 	CostEstimate    map[string]any `json:"cost_estimate"`
+	Timing          map[string]any `json:"timing"`
 	Store           *StoreStats    `json:"store"`
 	Config          HistoryConfig  `json:"config"`
+}
+
+// loopTiming splits one cycle into bounded wait, collection and database write,
+// averaged over the samples since start, so a cadence that does not match the
+// configured interval can be attributed instead of guessed at.
+func (a *App) loopTiming() map[string]any {
+	n := a.histDiagN.Load()
+	if n == 0 {
+		return map[string]any{"note": "no tick completed yet"}
+	}
+	avg := func(sum atomic.Int64) float64 { return round2(float64(sum.Load()) / float64(n)) }
+	return map[string]any{
+		"last_collect_ms": a.histLastCollect.Load(),
+		"last_write_ms":   a.histLastWrite.Load(),
+		"last_gap_ms":     a.histLastGap.Load(),
+		"avg_collect_ms":  avg(a.histSumCollect),
+		"avg_write_ms":    avg(a.histSumWrite),
+		"avg_gap_ms":      avg(a.histSumGap),
+		"ticks_measured":  n,
+		"note":            "gap = time between the start of two consecutive ticks (wait + collection + write of the previous cycle)",
+	}
 }
 
 // costEstimate turns the loop settings into the numbers that actually matter
@@ -451,6 +490,7 @@ func (a *App) historyStatus() historyStatus {
 		IntervalSeconds: h.IntervalSeconds,
 		FullSeconds:     h.FullSeconds,
 		CostEstimate:    costEstimate(h),
+		Timing:          a.loopTiming(),
 		Config:          h,
 	}
 	if e, ok := a.histErrf.Load().(string); ok && e != "" {

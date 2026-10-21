@@ -232,8 +232,18 @@ type App struct {
 	histTicks   atomic.Int64
 	histFulls   atomic.Int64
 	histErrf    atomic.Value // string
-	started     time.Time
-	logf        *log.Logger
+	// Loop diagnostics. "The loop is slower than the configured interval" is
+	// otherwise unanswerable from outside: these split one cycle into the
+	// bounded wait, the collection and the database write.
+	histLastCollect atomic.Int64
+	histLastWrite   atomic.Int64
+	histLastGap     atomic.Int64
+	histSumCollect  atomic.Int64
+	histSumWrite    atomic.Int64
+	histSumGap      atomic.Int64
+	histDiagN       atomic.Int64
+	started         time.Time
+	logf            *log.Logger
 }
 
 func (a *App) config() Config {

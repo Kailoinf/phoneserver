@@ -168,6 +168,13 @@ open it (`sqlite3 history.db`, or Python's `sqlite3` module).
 RFC3339. `points` comes back as `[ts, metric1, metric2, ...]`, oldest first, so
 it can be plotted directly; `columns` maps the positions to names.
 
+`/api/v1/history/stats` also carries a `timing` block that splits one cycle into
+the wait, the collection and the database write (last + average). Steady state
+here is a 9.5 s gap, 278 ms of collection and ~2 ms of writing. **The first few
+cycles after a restart are much slower (20-30 s)** because the TTL caches start
+cold: the first snapshot has to run `getprop`, `pm list packages` and `dumpsys`
+for real. Check `timing.avg_gap_ms` before concluding the cadence is wrong.
+
 **Battery cost, measured rather than guessed** (Snapdragon 8s Gen 4):
 
     idle 30 s                          0 ticks of process CPU — it is parked
