@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	version    = "1.2.0"
+	version    = "1.2.1"
 	defaultCfg = "/data/adb/phoneserver/config.json"
 )
 
