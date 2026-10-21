@@ -33,8 +33,14 @@ fi
 echo "==> building the WebUI (webui/ -> module/webroot)"
 if [ -f webui/package.json ]; then
     if [ -d webui/node_modules ]; then
-        if (cd webui && pnpm build); then
-            echo "   WebUI rebuilt from webui/"
+        # `pnpm build` runs its own "verify deps before run" install first, which
+        # needs the network: with no internet that step hangs forever and the
+        # release never gets built. Disable it, bound the step, and fall back to
+        # calling tsc/vite directly (both work offline from a wired node_modules).
+        if (cd webui && timeout 240 pnpm --config.verify-deps-before-run=false build); then
+            echo "   WebUI rebuilt from webui/ (pnpm)"
+        elif (cd webui && timeout 240 ./node_modules/.bin/tsc --noEmit && timeout 240 node node_modules/vite/bin/vite.js build); then
+            echo "   WebUI rebuilt from webui/ (direct tsc + vite build)"
         else
             echo "!! WebUI build failed; shipping the committed module/webroot as-is"
         fi

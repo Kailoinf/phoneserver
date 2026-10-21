@@ -559,6 +559,15 @@ curl -s -X POST http://127.0.0.1:8080/mcp \
 
 WebUI 的源码在 `webui/`（Vite + Preact + TypeScript + Tailwind v4），构建产物提交在 `module/webroot/`；`./build.sh` 在有 `webui/node_modules` 时重新构建，否则直接用仓库里已构建的产物——**手机端永远不需要 node**。
 
+### 改动 WebUI 时的约定（都是踩过的坑）
+
+- 构建：`cd webui && pnpm install && pnpm build`，产物直接写进 `module/webroot/`。`vite.config.ts` 的 `base: './'` 不能改：同一份产物既要被管理器 WebView 从磁盘按相对路径加载，又要被守护进程在 `/ui/` 下提供。
+- **断网也能构建**：`webui/node_modules` 可以从本机 pnpm 缓存符号链接出来（`preact`、`vite`、`@preact/preset-vite`、`tailwindcss`、`@tailwindcss/vite`、`@types/node` 都在缓存里），接完直接 `node node_modules/vite/bin/vite.js build`。TypeScript 检查用 `./node_modules/.bin/tsc --noEmit`。
+- **两种路径写法**：`apiGet`/`apiPost` 收 API 相对路径（`/battery`），也接受完整写法（`/api/v1/battery`）——两者等价。但 **`/files/*` 与 `/mcp` 不在 `/api/v1` 之下**，必须用 `rawRequest(绝对路径, { method })`；用 `apiGet` 会被补成 `/api/v1/files/...` 并拿到 404（浏览器验证时踩到过）。
+- 页面契约：每个文件 `default export` 一个无 props 组件；数据字段一律照抄真机响应（`/api/v1/all`、`/files/<share>/?json=1`、`/api/v1/history/quality`、`/api/v1/stream/status` …），不要凭记忆写字段名。
+- 上传文件走 `fetch(apiURL(...), { method: 'POST', headers: { 'X-API-Key': token }, body: FormData })`；`apiPost` 只发 JSON。
+- 验证方式：配置页临时打开局域网 → 浏览器打开 `http://<手机IP>:8080/ui/` → 填 token → 逐页看，控制台必须 0 error。**管理器 WebView 里的实际渲染只有用户能在手机上看**，别声称自己验过。
+
 ---
 
 ## 已知限制
