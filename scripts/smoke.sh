@@ -26,24 +26,51 @@ for a in "$@"; do
     esac
 done
 
-H="X-API-Key: $TOK"
 pass=0
 fail=0
+LAST=
+# 200, as a regex, is not valid in a `case` pattern; use an explicit variable so
+# the retry helper below can compare status codes.
+WANT_SHOT=200
+
+# Where the response body is buffered. /data/local/tmp exists for the adb shell
+# on Android; /tmp is the fallback for a desktop run.
+BODYFILE=/data/local/tmp/.phoneserver-smoke.body
+[ -d /data/local/tmp ] || BODYFILE=/tmp/.phoneserver-smoke.body
 
 # req <name> <expected-status-regex> <method> <path> [body] [extra-curl-args...]
+#
+# Shifts are done one at a time on purpose: mksh (Android's /system/bin/sh)
+# aborts the whole function when `shift N` exceeds the number of arguments, and
+# the single `shift 5` this used to do made every check on the phone print
+# nothing at all instead of failing loudly.
 req() {
-    name=$1; want=$2; method=$3; path=$4; body=${5:-}
-    shift 5 2>/dev/null || shift $#
+    name=$1; want=$2; method=$3; path=$4
+    body=
+    i=0
+    while [ $i -lt 4 ] && [ $# -gt 0 ]; do shift; i=$((i+1)); done
+    # The 5th slot is always the body, even when the caller writes '' and puts
+    # curl flags after it: leaving the empty string in "$@" made curl treat it
+    # as a URL and fail with an empty response.
+    if [ $# -gt 0 ]; then body=$1; shift; fi
+
     if [ -n "$body" ]; then
-        out=$(curl -s -o /tmp/.smoke.body -w '%{http_code}' -X "$method" \
+        out=$(curl -s -o "$BODYFILE" -w '%{http_code}' -X "$method" \
             -H "X-API-Key: $TOK" -H 'Content-Type: application/json' -d "$body" \
             "$BASE$path" "$@" 2>/dev/null)
     else
-        out=$(curl -s -o /tmp/.smoke.body -w '%{http_code}' -X "$method" -H "X-API-Key: $TOK" "$BASE$path" "$@" 2>/dev/null)
+        out=$(curl -s -o "$BODYFILE" -w '%{http_code}' -X "$method" -H "X-API-Key: $TOK" \
+            "$BASE$path" "$@" 2>/dev/null)
+    fi
+    LAST=$out
+    if [ -z "$out" ]; then
+        fail=$((fail+1))
+        printf 'ERROR %-42s curl produced nothing (host unreachable?)\n' "$name"
+        return
     fi
     case "$out" in
         $want) pass=$((pass+1)); printf 'PASS  %-42s %s\n' "$name" "$out" ;;
-        *)     fail=$((fail+1)); printf 'FAIL  %-42s got %s want %s :: %s\n' "$name" "$out" "$want" "$(head -c 200 /tmp/.smoke.body | tr '\n' ' ')" ;;
+        *)     fail=$((fail+1)); printf 'FAIL  %-42s got %s want %s :: %s\n' "$name" "$out" "$want" "$(head -c 200 "$BODYFILE" | tr '\n' ' ')" ;;
     esac
 }
 
@@ -69,7 +96,22 @@ req "packages"               200 GET /api/v1/packages
 req "processes"              200 GET /api/v1/processes
 
 echo "-- screen --"
-req "screenshot (meta)"      200 GET '/api/v1/screenshot?meta=1&quality=60&scale=0.3'
+# A 429 here means another client (a WebUI page, a second smoke run) is already
+# capturing; that is the guard doing its job, so retry once before judging.
+shot() {
+    i=0
+    while [ $i -lt 3 ]; do
+        req "screenshot (meta)"      200 GET '/api/v1/screenshot?meta=1&quality=60&scale=0.3'
+        [ "$LAST" = "$WANT_SHOT" ] && return
+        [ "$LAST" = "429" ] || return
+        # Somebody else (a WebUI page, a second smoke run) is capturing; the
+        # guard returns 429 on purpose, so wait for them and try again.
+        fail=$((fail-1)); i=$((i+1)); sleep 2
+    done
+    fail=$((fail+1))
+    printf 'FAIL  %-42s still 429 after 3 tries\n' "screenshot (meta)"
+}
+shot
 req "stream/display"         200 GET /api/v1/stream/display
 req "stream/status"          200 GET /api/v1/stream/status
 
@@ -129,5 +171,5 @@ req "/ui/ (200 once webroot is built)" 200 GET /ui/
 
 echo
 echo "== $pass passed, $fail failed =="
-rm -f /tmp/.smoke.body
+rm -f "$BODYFILE"
 [ "$fail" = "0" ]
