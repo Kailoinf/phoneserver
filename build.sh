@@ -26,6 +26,11 @@ echo "==> staging into the module tree"
 mkdir -p module/bin
 cp "$OUT" module/bin/phoneserver
 chmod 0755 module/bin/phoneserver
+# Keep the historical alias in sync too. Two build outputs with different names
+# is exactly how a stale binary ends up deployed: the md5 check then compares it
+# against the other stale copy and "passes". One canonical artifact, one name.
+cp "$OUT" ps-static
+chmod 0755 ps-static
 
 cd module
 chmod 0755 ./*.sh bin/phoneserver 2>/dev/null || true
