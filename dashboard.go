@@ -48,6 +48,25 @@ button:hover{border-color:var(--acc)}
   <button onclick="pushNow()">push now</button>
 </header>
 <main id="grid"></main>
+<div style="padding:0 18px 14px">
+  <div class="card">
+    <h2>历史数据（本机 SQLite）</h2>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:9px">
+      <select id="hm"></select>
+      <select id="hr">
+        <option value="-1h">最近 1 小时</option>
+        <option value="-6h" selected>最近 6 小时</option>
+        <option value="-24h">最近 24 小时</option>
+        <option value="-7d">最近 7 天</option>
+        <option value="-30d">最近 30 天</option>
+      </select>
+      <button onclick="loadHistory()">刷新</button>
+    </div>
+    <canvas id="hc" style="width:100%;height:160px;display:block;background:#0f141c;border:1px solid var(--line);border-radius:8px"></canvas>
+    <div id="hsum" class="dim" style="margin-top:7px"></div>
+    <div id="hstat"></div>
+  </div>
+</div>
 <footer style="padding:0 18px 24px"><div id="err"></div></footer>
 <script>
 const $=s=>document.querySelector(s);
@@ -114,7 +133,75 @@ function render(s){
 async function load(){try{$('#err').textContent='';const s=await api('/api/v1/all');render(s);}catch(e){$('#err').textContent=String(e.message||e);}}
 async function pushNow(){try{const r=await api('/api/v1/push',{method:'POST'});$('#err').textContent='push: '+(r.ok?('ok #'+r.http_status):(r.last_error||'failed'));}catch(e){$('#err').textContent=String(e.message||e);}}
 $('#tok').value=localStorage.getItem('ps_tok')||'';
+
+/* ---------------- history panel (SQLite-backed) ---------------- */
+var HM=['battery_temp_c','battery_capacity_pct','battery_current_a','cpu_usage_pct','gpu_busy_pct','gpu_temp_c','mem_used_pct','max_temp_c','net_rx_bps','net_tx_bps','wifi_rssi_dbm','data_free_bytes','uptime_s','collect_ms'];
+var HL={'battery_temp_c':'电池温度 °C','battery_capacity_pct':'电量 %','battery_current_a':'电池电流 A','cpu_usage_pct':'CPU 占用 %','gpu_busy_pct':'GPU 占用 %','gpu_temp_c':'GPU 温度 °C','mem_used_pct':'内存占用 %','max_temp_c':'最高温度 °C','net_rx_bps':'下行速率 B/s','net_tx_bps':'上行速率 B/s','wifi_rssi_dbm':'Wi-Fi 信号 dBm','data_free_bytes':'data 可用空间','uptime_s':'开机时长 s','collect_ms':'单次采集耗时 ms'};
+function fillHM(list){var s=$('#hm'),cur=s.value,h='';list.forEach(function(m){h+='<option value="'+m+'">'+(HL[m]||m)+'</option>';});if(h)s.innerHTML=h;if(cur)s.value=cur;}
+fillHM(HM);
+function fv(v){if(v===null||v===undefined||v==='')return '–';var n=+v;if(!isFinite(n))return String(v);if(Math.abs(n)>=100000)return fmtB(n);return (Math.abs(n)>=100?Math.round(n):Math.round(n*100)/100).toString();}
+function drawHChart(pts,idx){
+  var c=$('#hc'),dpr=window.devicePixelRatio||1,w=c.clientWidth||600,h=160;
+  c.width=Math.max(1,Math.round(w*dpr));c.height=Math.round(h*dpr);
+  var g=c.getContext('2d');if(!g)return;g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,w,h);
+  var vals=[],t0=null,t1=null;
+  for(var i=0;i<pts.length;i++){var ts=+pts[i][0],v=+pts[i][idx];if(!isFinite(ts)||!isFinite(v))continue;if(t0===null)t0=ts;t1=ts;vals.push([ts,v]);}
+  g.font='11px monospace';
+  if(vals.length<2){g.fillStyle='#8b98a9';g.fillText(vals.length?'只有一个采样点，再等一个周期':'这个时间窗内没有数据',10,22);return;}
+  var vmin=Infinity,vmax=-Infinity;
+  for(i=0;i<vals.length;i++){if(vals[i][1]<vmin)vmin=vals[i][1];if(vals[i][1]>vmax)vmax=vals[i][1];}
+  if(vmax-vmin<1e-9)vmax=vmin+1;
+  var pad=26,span=Math.max(1,t1-t0);
+  var X=function(ts){return pad+(ts-t0)/span*(w-pad*2);};
+  var Y=function(v){return h-pad-(v-vmin)/(vmax-vmin)*(h-pad*2);};
+  g.strokeStyle='rgba(139,152,169,.22)';g.lineWidth=1;
+  for(var k=0;k<=3;k++){var gy=pad+k*(h-pad*2)/3;g.beginPath();g.moveTo(pad,gy);g.lineTo(w-pad,gy);g.stroke();}
+  g.beginPath();g.moveTo(X(vals[0][0]),Y(vals[0][1]));
+  for(i=1;i<vals.length;i++)g.lineTo(X(vals[i][0]),Y(vals[i][1]));
+  g.strokeStyle='#58a6ff';g.lineWidth=1.7;g.stroke();
+  g.lineTo(X(vals[vals.length-1][0]),h-pad);g.lineTo(X(vals[0][0]),h-pad);g.closePath();
+  g.fillStyle='rgba(88,166,255,.15)';g.fill();
+  g.fillStyle='#8b98a9';
+  g.fillText(fv(vmax),2,pad+4);g.fillText(fv(vmin),2,h-pad+4);
+  g.fillText(new Date(vals[0][0]*1000).toLocaleTimeString(),pad,h-5);
+  g.fillText(new Date(vals[vals.length-1][0]*1000).toLocaleTimeString(),w-pad-58,h-5);
+  g.beginPath();g.arc(X(vals[vals.length-1][0]),Y(vals[vals.length-1][1]),2.6,0,Math.PI*2);g.fillStyle='#58a6ff';g.fill();
+}
+async function loadHistory(){
+  var m=$('#hm').value||'battery_temp_c',r=$('#hr').value||'-6h';
+  try{
+    $('#err').textContent='';
+    var j=await api('/api/v1/history?metrics='+encodeURIComponent(m)+'&since='+encodeURIComponent(r)+'&limit=320&stats=1');
+    var idx=(j.columns||[]).indexOf(m);
+    drawHChart(j.points||[],idx<0?0:idx);
+    var s=j.stats||{};
+    $('#hsum').textContent=(j.count||0)+' 个点 · '+(HL[m]||m)+' · 最小 '+fv((s.min||{})[m])+' · 平均 '+fv((s.avg||{})[m])+' · 最大 '+fv((s.max||{})[m])+' · 最新 '+fv((s.last||{})[m]);
+  }catch(e){$('#hsum').textContent=String(e.message||e);
+    if(String(e.message||e).indexOf('503')>=0)$('#hsum').textContent='本地历史未启用（history.enabled=false）';return;}
+  try{
+    var t=await api('/api/v1/history/stats'),st=t.store||{},co=t.cost_estimate||{};
+    var srcs=st.logs_by_source?Object.keys(st.logs_by_source).map(function(k){return k+'×'+st.logs_by_source[k];}).join('  '):'–';
+    $('#hstat').innerHTML=
+      row('采样间隔',(t.interval_seconds||'?')+' 秒（完整文档 '+(t.full_seconds||'?')+' 秒）')+
+      row('样本 / 快照 / 日志',(st.samples||0)+' / '+(st.snapshots||0)+' / '+(st.logs||0))+
+      row('数据库',fmtB(st.db_bytes)+'  <span class="dim">'+(st.path||'')+'</span>')+
+      row('保留策略','样本 '+(st.retention_days||0)+' 天 · 快照 '+(st.snapshot_retention_days||0)+' 天 · 日志 '+(st.log_retention_days||0)+' 天 · 上限 '+(st.max_db_mb||0)+' MB')+
+      row('快照占用（精确）',st.snapshot_bytes_per_day?fmtB(st.snapshot_bytes_per_day)+' / 天 × '+(st.snapshot_retention_days||0)+' 天保留':'–')+
+      row('实测增长',st.bytes_per_day?fmtB(st.bytes_per_day)+' / 天（主库增量）':(st.growth_note||'–'))+
+      row('预计填满上限',st.est_days_to_cap?Math.round(st.est_days_to_cap)+' 天':'–')+
+      row('采集开销',(co.collections_per_day||0)+' 次/天 · 约 '+(co.cpu_seconds_per_day||0)+' 秒 CPU · '+(co.avg_cpu_percent_of_core||0)+'% 单核')+
+      row('快照压缩比',st.compression_ratio?st.compression_ratio+'×':'–')+
+      row('日志来源',srcs)+row('丢弃的日志行',st.dropped_log_lines||0)+
+      row('上次写入错误',t.last_error||'无');
+  }catch(e){$('#hstat').innerHTML='';}
+}
+api('/api/v1/history/metrics').then(function(j){
+  if(j&&j.metrics)fillHM(HM.filter(function(m){return j.metrics.indexOf(m)>=0;}).concat(j.metrics.filter(function(m){return HM.indexOf(m)<0;})));
+}).catch(function(){});
+$('#hm').onchange=loadHistory;$('#hr').onchange=loadHistory;
+
 load();setInterval(load,3000);
+loadHistory();setInterval(function(){if(!document.hidden)loadHistory();},30000);
 </script>
 </body>
 </html>

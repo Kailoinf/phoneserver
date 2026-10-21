@@ -9,6 +9,7 @@ KernelSU / Magisk 模块形态，主体是**一个静态链接的 Go 二进制**
 - **管理器 WebUI**：在 KernelSU / SukiSU 管理器里直接打开，实时仪表盘 + 服务控制
 - **网页仪表盘**：浏览器打开 `http://<手机IP>:8080/` 即可，深色卡片、3 秒自动刷新
 - **云端推送**：按间隔把同一份文档 POST 给你的服务器，失败重试，结果可查
+- **本地历史**：默认每 10 秒把数据写进手机本地的 SQLite 库（标量指标 + 完整文档 + 日志），不依赖云端也能回看曲线，自动按保留策略清理
 - **令牌鉴权**：默认生成随机令牌，支持 `X-API-Key` / `Bearer` / `?key=`
 - **看门狗**：服务崩了 10 秒内自动拉起，开机自启
 
@@ -67,6 +68,12 @@ curl -H 'X-API-Key: <令牌>' http://192.168.1.50:8080/api/v1/all   # 全部数�
 | PUT | `/api/v1/config` | 改推送地址/间隔/令牌/TTL/端口 |
 | GET | `/api/v1/push` | 推送状态：计数、上次结果、上次错误 |
 | POST | `/api/v1/push` | 立刻推送一次，返回结果 |
+| GET | `/api/v1/history` | 查询历史样本（`metrics`/`since`/`until`/`limit`/`stats`） |
+| GET | `/api/v1/history/metrics` | 可查询的指标列清单 |
+| GET | `/api/v1/history/logs` | 查询库内日志（`grep`/`level`/`since`） |
+| GET | `/api/v1/history/snapshot` | 取回某个时刻的完整文档（可只取一段） |
+| GET | `/api/v1/history/stats` | 库大小、行数、增长速度、耗电估算 |
+| POST | `/api/v1/history/prune` | 立刻执行保留策略 |
 
 读端点限定 GET，其他方法返回 405；除 `/api/v1/health` 外都需要令牌。
 
@@ -114,6 +121,52 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 ```
 
+## 本地历史（SQLite）
+
+服务默认把数据写进手机本地的 SQLite 库，**不需要云端也能回看历史**。
+
+    table        内容                                           默认保留
+    samples      每个周期的标量指标（电量/温度/CPU/内存/网络速率…共 65 列）  30 天
+    snapshots    完整的 /api/v1/all 文档，gzip 压缩后存 BLOB            3 天
+    logs         日志行（实时镜像；首次启动还会回填已有的日志文件）          7 天
+
+库文件是 `/data/adb/phoneserver/history.db`，与配置、日志同目录——**刻意放在模块目录之外**，升级模块不会丢历史。
+
+驱动用 `modernc.org/sqlite`，即**纯 Go 实现的 SQLite**，不是常见的 mattn/go-sqlite3。这是被构建方式逼出来的选择：二进制必须无 CGO、静态链接才能在 Android 上 exec（见下文构建一节），而 mattn 需要 CGO + NDK。真机已验证：WAL 在 f2fs 上可用、跨进程持久、文件头是标准的 `SQLite format 3`，可直接用任何 SQLite 客户端打开（`sqlite3 history.db`，或 Python 的 `sqlite3` 模块）。
+
+    # 最近 6 小时的电池温度与 CPU 占用，带 min/avg/max
+    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history?metrics=battery_temp_c,cpu_usage_pct&since=-6h&stats=1'
+    # since/until 可以是 -30m / -6h / -7d 这类相对写法，也可以是 unix 秒或 RFC3339
+    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/logs?since=-24h&grep=error&limit=50'
+    curl -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/snapshot?section=battery'
+    curl -X POST -H 'X-API-Key: <token>' 'http://<手机IP>:8080/api/v1/history/prune'
+
+`points` 是 `[ts, 指标1, 指标2, ...]`，时间戳在前、由旧到新，便于直接画图；`columns` 给出列名对应关系。
+
+### 耗电与磁盘：实测，不是估算
+
+结论先说：**服务挂着本身不耗电，耗电只跟"采集了多少次"成正比。**
+
+    闲置 30 秒                          进程 CPU 增量 0 ticks（完全睡着）
+    一次完整采集（/api/v1/all）           约 146 ms 进程 CPU 时间（含 getprop / cmd wifi / dumpsys 子进程）
+    每次采集的墙钟耗时                    约 250–300 ms
+    按默认每 10 秒一次                    8640 次/天 ≈ 1261 秒 CPU/天 ≈ 单核 1.46%
+    对照：WebUI 打开时（3 秒轮询）         单核约 4.9%
+
+    磁盘（按默认保留策略）
+    样本 table    约 4 MB/天 × 30 天
+    快照 table    约 35 KB 原始 → gzip 约 5 KB，×8640/天 ≈ 44 MB/天 × 3 天
+    日志 table    随访问量而定
+    硬上限        512 MB（超过就按"最老的快照优先"逐出，永远不会把手机塞满）
+
+### 想更省电：降低"完整文档"的频率
+
+配置里有两个旋钮：`interval_seconds`（采样周期，默认 10 秒）和 `full_seconds`（采集**完整文档**的周期，默认也是 10 秒，也就是严格按"全部数据每 10 秒一次"）。
+
+把 `full_seconds` 调成 60：中间的 tick 只走**廉价路径**——只读 sysfs 和 /proc，不 spawn getprop/dumpsys/wifi 子进程；标量指标仍然每 10 秒一条。按实测的单次开销推算，每天 CPU 从 1261 秒降到约 270 秒（单核 1.46% → 0.31%）。库里每行都有 `full` 列标明这一行是完整采集还是廉价采集，绝不含糊。
+
+    { "history": { "interval_seconds": 10, "full_seconds": 60 } }
+
 ## 管理器 WebUI
 
 在 KernelSU / SukiSU 管理器里打开模块卡片 → **WebUI**：实时指标 + 服务控制（重启/停止/启动）、切换监听端口、编辑推送设置、立即推送、查看/复制令牌、看日志。
@@ -138,7 +191,7 @@ sh .../webui.sh set-port 9090
 ./build.sh          # 产出 phoneserver-arm64 与 phoneserver-module.zip
 ```
 
-需要 Go。因为只用标准库，交叉编译不需要联网。
+需要 Go。除纯 Go 的 SQLite 驱动（`modernc.org/sqlite`）外没有其他依赖；那一个依赖需要联网拉取一次（国内建议 `export GOPROXY=https://goproxy.cn,direct`），之后走本地模块缓存，编译本身仍是离线交叉编译。
 
 **绝对不要用 `-buildmode=pie`。** Go 在 linux/arm64 上的 PIE 产物带 `PT_INTERP=/lib/ld-linux-aarch64.so.1`，而 Android 的加载器是 `/system/bin/linker64`，该路径不存在 → 内核拒绝 exec，报的是很有迷惑性的 `No such file or directory`（其实是解释器缺失）并返回 126。必须是静态 `ET_EXEC`。`build.sh` 里有这个断言（`readelf -l … | grep -c INTERP` 必须为 0）。
 
@@ -151,8 +204,11 @@ sh .../webui.sh set-port 9090
 ├── build.sh              # 交叉编译 + 打包成可安装模块
 ├── main.go               # HTTP 服务、路由、鉴权、配置
 ├── collect.go            # 所有采集器（sysfs / proc / getprop / dumpsys）
+├── store.go              # SQLite 层：建表、写入、查询、保留策略、日志镜像
+├── history.go            # 采样循环（完整 tick / 廉价 tick）、成本估算、日志回填
+├── historyapi.go         # /api/v1/history/* 的处理函数与时间参数解析
 ├── push.go               # 云端推送与重试
-├── dashboard.go          # 浏览器仪表盘（内嵌 HTML）
+└── dashboard.go          # 浏览器仪表盘（内嵌 HTML，含历史曲线面板）
 └── module/               # 模块骨架
     ├── module.prop       # 模块元数据（管理器里显示的名称/版本/作者）
     ├── customize.sh      # 安装时执行
@@ -176,6 +232,15 @@ sh .../webui.sh set-port 9090
 | `*_ttl_seconds` | 见文件 | 昂贵数据源的缓存时长（getprop/wifi/dumpsys/包列表/进程） |
 | `storage_mounts` | `/data`,`/`,`/system`,`/storage/emulated/0` | 要统计的挂载点 |
 | `push.*` | 关闭 | 接收地址、间隔、Bearer、超时、重试次数、额外请求头 |
+| `history.enabled` | `true` | 是否启用本地 SQLite 历史 |
+| `history.db_path` | `/data/adb/phoneserver/history.db` | 库文件位置（改后需重启） |
+| `history.interval_seconds` | `10` | 采样周期 |
+| `history.full_seconds` | `10` | 采集完整文档的周期；大于采样周期时中间的 tick 走廉价路径 |
+| `history.retention_days` | `30` | 样本保留天数 |
+| `history.snapshot_retention_days` | `3` | 快照保留天数 |
+| `history.log_retention_days` | `7` | 日志保留天数 |
+| `history.max_db_mb` | `512` | 硬上限，超过就逐出最老的快照 |
+| `history.backfill_logs` | `true` | 首次启动是否把已有日志文件回填进库 |
 
 ## 安全说明
 
@@ -188,6 +253,8 @@ sh .../webui.sh set-port 9090
 在 REDMI Turbo 4 Pro / POCO F7（`onyx`，SM8735）+ HyperOS 3（Android 16）+ SukiSU Ultra v4.2.1 上实测：
 
 开机自启与看门狗自愈（kill 掉 10 秒内自动拉起）、17 个读端点全部 200、管理器 WebUI 正常渲染、网页仪表盘正常渲染、带 Bearer 的推送到达真实接收端并重试正确、端口切换后自愈、`GET /config → PUT 改动 → 回读` 不丢令牌、SELinux 强制模式下 root 读取正常。
+
+本地历史另外单独验证过：SQLite 在设备上创建/写入/跨进程持久化正常（`PRAGMA integrity_check` = ok，`journal_mode` = wal）、采样节奏实测为稳定的 10.0 秒、旧日志文件被正确回填进库且时间戳按本机时区解析、六个 `/api/v1/history/*` 端点全部 200 且返回真实曲线、保留策略与 checkpoint 工作正常。
 
 ## 许可
 

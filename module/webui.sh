@@ -17,6 +17,13 @@
 #   clear-logs               truncate the logs
 #   token                    print the API token
 #
+#   history-stats            local history db: size, rows, growth, battery cost
+#   history [metrics] [since] [n]    e.g. "battery_temp_c,cpu_usage_pct" -6h 240
+#   history-logs [n] [grep] [since]  stored log lines (live + backfilled)
+#   history-snapshot [ts] [section]  the full document stored nearest ts
+#   history-prune            apply the retention policy now
+#   history-panel [metric] [since]   {stats,series,logs} in one call (UI polling)
+#
 # Rule for this script: never report ok:true for something that did not happen.
 set -u
 
@@ -273,6 +280,85 @@ cmd_clear_logs() {
     printf '{"ok":true,"action":"logs-cleared"}\n'
 }
 
+# ---- history (SQLite-backed) ----
+# history-stats                    db size, row counts, growth, battery-cost estimate
+# history [metrics] [since] [n]    sample series, e.g. "battery_temp_c,cpu_usage_pct" -6h 240
+# history-logs [n] [grep] [since]  stored log lines
+# history-snapshot [ts] [section]  the full stored document nearest ts
+# history-prune                    run the retention policy now
+# history-panel [metric] [since]   {stats,series,logs} in one call (what the UI polls)
+hist_api() {  # hist_api <path-with-query>
+    [ -n "$(daemon_pid)" ] || { printf '{"ok":false,"error":"service is not running"}'; return 1; }
+    OUT=$(api "$1" 2>/dev/null)
+    if [ -z "$OUT" ]; then
+        printf '{"ok":false,"error":"no answer from the API on port %s"}' "$(port)"
+        return 1
+    fi
+    printf '%s' "$OUT"
+}
+
+cmd_history_stats() { hist_api "history/stats" ; }
+cmd_history_metrics() { hist_api "history/metrics" ; }
+
+cmd_history() {
+    M=${1:-}
+    S=${2:--1h}
+    L=${3:-360}
+    case "$L" in ''|*[!0-9]*) L=360 ;; esac
+    Q="since=$(jesc "$S")&limit=$L&stats=1"
+    [ -n "$M" ] && Q="metrics=$(jesc "$M")&$Q"
+    hist_api "history?$Q"
+}
+
+cmd_history_logs() {
+    N=${1:-50}
+    G=${2:-}
+    S=${3:--6h}
+    case "$N" in ''|*[!0-9]*) N=50 ;; esac
+    Q="since=$(jesc "$S")&limit=$N"
+    [ -n "$G" ] && Q="$Q&grep=$(jesc "$G")"
+    hist_api "history/logs?$Q"
+}
+
+cmd_history_snapshot() {
+    TS=${1:-}
+    SEC=${2:-}
+    Q=""
+    [ -n "$TS" ] && Q="ts=$(jesc "$TS")"
+    [ -n "$SEC" ] && Q="${Q:+$Q&}section=$(jesc "$SEC")"
+    hist_api "history/snapshot${Q:+?$Q}"
+}
+
+cmd_history_prune() {
+    [ -n "$(daemon_pid)" ] || { printf '{"ok":false,"error":"service is not running"}'; return 1; }
+    OUT=$(curl -s --max-time 15 -w '\nHTTP%{http_code}' -X POST \
+        -H "X-Api-Key: $(token)" "http://$(api_host):$(port)/api/v1/history/prune")
+    C=$(code_of "$OUT")
+    B=$(body_of "$OUT")
+    if [ -z "$B" ]; then
+        printf '{"ok":false,"error":"no answer from the API on port %s"}' "$(port)"
+        return 1
+    fi
+    printf '%s\n' "$B"
+    case "$C" in 2*) return 0 ;; *) return 1 ;; esac
+}
+
+cmd_history_panel() {
+    M=${1:-battery_temp_c}
+    S=${2:--6h}
+    L=${3:-240}
+    case "$L" in ''|*[!0-9]*) L=240 ;; esac
+    [ -n "$(daemon_pid)" ] || {
+        printf '{"ok":false,"error":"service is not running"}'
+        return 1
+    }
+    ST=$(api history/stats 2>/dev/null)
+    SE=$(api "history?metrics=$(jesc "$M")&since=$(jesc "$S")&limit=$L&stats=1" 2>/dev/null)
+    LG=$(api "history/logs?since=-1h&limit=15" 2>/dev/null)
+    printf '{"ok":true,"stats":%s,"series":%s,"logs":%s}\n' \
+        "${ST:-null}" "${SE:-null}" "${LG:-null}"
+}
+
 SUB=${1:-status}
 shift 2>/dev/null || true
 case "$SUB" in
@@ -288,6 +374,13 @@ case "$SUB" in
     logs)       cmd_logs "$@" ;;
     api-log)    cmd_api_log "$@" ;;
     clear-logs) cmd_clear_logs ;;
+    history)    cmd_history "$@" ;;
+    history-stats)    cmd_history_stats ;;
+    history-metrics)  cmd_history_metrics ;;
+    history-logs)     cmd_history_logs "$@" ;;
+    history-snapshot) cmd_history_snapshot "$@" ;;
+    history-prune)    cmd_history_prune ;;
+    history-panel)    cmd_history_panel "$@" ;;
     token)      token; echo ;;
     *)          printf '{"error":"unknown subcommand: %s"}' "$(jesc "$SUB")"; exit 1 ;;
 esac

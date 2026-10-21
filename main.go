@@ -27,13 +27,14 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	_ "time/tzdata" // Android has no system zoneinfo; embed the database
 )
 
 const (
-	version    = "1.1.4"
+	version    = "1.2.0"
 	defaultCfg = "/data/adb/phoneserver/config.json"
 )
 
@@ -50,19 +51,20 @@ type PushConfig struct {
 }
 
 type Config struct {
-	Listen      string     `json:"listen"`
-	APIToken    string     `json:"api_token"`
-	DeviceID    string     `json:"device_id"`
-	LogDir      string     `json:"log_dir"`
-	LogRequests bool       `json:"log_requests"`
-	LogMaxBytes int64      `json:"log_max_bytes"`
-	GetpropTTL  int        `json:"getprop_ttl_seconds"`
-	WifiTTL     int        `json:"wifi_ttl_seconds"`
-	PowerTTL    int        `json:"power_ttl_seconds"`
-	PackagesTTL int        `json:"packages_ttl_seconds"`
-	ProcsTTL    int        `json:"procs_ttl_seconds"`
-	Mounts      []string   `json:"storage_mounts"`
-	Push        PushConfig `json:"push"`
+	Listen      string        `json:"listen"`
+	APIToken    string        `json:"api_token"`
+	DeviceID    string        `json:"device_id"`
+	LogDir      string        `json:"log_dir"`
+	LogRequests bool          `json:"log_requests"`
+	LogMaxBytes int64         `json:"log_max_bytes"`
+	GetpropTTL  int           `json:"getprop_ttl_seconds"`
+	WifiTTL     int           `json:"wifi_ttl_seconds"`
+	PowerTTL    int           `json:"power_ttl_seconds"`
+	PackagesTTL int           `json:"packages_ttl_seconds"`
+	ProcsTTL    int           `json:"procs_ttl_seconds"`
+	Mounts      []string      `json:"storage_mounts"`
+	Push        PushConfig    `json:"push"`
+	History     HistoryConfig `json:"history"`
 }
 
 func defaultConfig() Config {
@@ -86,6 +88,7 @@ func defaultConfig() Config {
 			TimeoutS: 10,
 			Retries:  3,
 		},
+		History: defaultHistoryConfig(),
 	}
 }
 
@@ -220,9 +223,17 @@ type App struct {
 	cfg     Config
 	cache   *ttlCache
 	sampler *sampler
-	pusher  *pusher
-	started time.Time
-	logf    *log.Logger
+	// tickSampler belongs to the history loop: separate delta state, so the
+	// 10-second sampling cadence cannot distort the rates the API reports.
+	tickSampler *sampler
+	pusher      *pusher
+	store       *Store
+	histStop    chan struct{}
+	histTicks   atomic.Int64
+	histFulls   atomic.Int64
+	histErrf    atomic.Value // string
+	started     time.Time
+	logf        *log.Logger
 }
 
 func (a *App) config() Config {
@@ -372,13 +383,20 @@ func (a *App) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	cfg := a.config()
-	writeJSON(w, http.StatusOK, map[string]any{
+	h := cfg.History.norm()
+	out := map[string]any{
 		"status":          "ok",
 		"server_version":  version,
 		"server_uptime_s": round2(time.Since(a.started).Seconds()),
 		"auth_required":   cfg.APIToken != "",
 		"push_enabled":    cfg.Push.Enabled && cfg.Push.URL != "",
-	})
+		"history_enabled": a.store != nil && h.Enabled,
+	}
+	if a.store != nil && h.Enabled {
+		out["history_ticks"] = a.histTicks.Load()
+		out["history_interval_seconds"] = h.IntervalSeconds
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (a *App) handleEndpoints(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +426,12 @@ func (a *App) handleEndpoints(w http.ResponseWriter, r *http.Request) {
 			{"method": "PUT", "path": "/api/v1/config", "desc": "update push settings / token / ttl"},
 			{"method": "GET", "path": "/api/v1/push", "desc": "last push result + queue state"},
 			{"method": "POST", "path": "/api/v1/push", "desc": "push the current snapshot to the configured URL now"},
+			{"method": "GET", "path": "/api/v1/history", "desc": "query stored samples (metrics, since/until, limit)"},
+			{"method": "GET", "path": "/api/v1/history/metrics", "desc": "list the queryable metric columns"},
+			{"method": "GET", "path": "/api/v1/history/logs", "desc": "query stored log lines (grep/level/since)"},
+			{"method": "GET", "path": "/api/v1/history/snapshot", "desc": "the full stored document at/near a timestamp"},
+			{"method": "GET", "path": "/api/v1/history/stats", "desc": "db size, row counts, growth rate, cost estimate"},
+			{"method": "POST", "path": "/api/v1/history/prune", "desc": "apply the retention policy now"},
 		},
 	})
 }
@@ -505,6 +529,7 @@ func (a *App) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if next.Push.Interval < 10 {
 		next.Push.Interval = 10
 	}
+	next.History = next.History.norm()
 	if next.Listen == "" {
 		next.Listen = cur.Listen
 	}
@@ -585,24 +610,41 @@ func main() {
 		return
 	}
 
-	var logw io.Writer = os.Stdout
+	var base io.Writer = os.Stdout
 	if rw, rerr := newRotatingWriter(filepath.Join(cfg.LogDir, "phoneserver.log"), cfg.LogMaxBytes, 3); rerr == nil {
-		logw = io.MultiWriter(os.Stdout, rw)
+		base = io.MultiWriter(os.Stdout, rw)
 	} else {
 		fmt.Fprintf(os.Stderr, "log file unavailable (%v), logging to stdout only\n", rerr)
 	}
-	logger := log.New(logw, "", log.LstdFlags|log.Lmicroseconds)
 
 	app := &App{
 		cfgPath: *cfgPath,
 		cfg:     cfg,
 		cache:   newTTLCache(),
 		started: time.Now(),
-		logf:    logger,
 	}
 	app.sampler = newSampler(app)
+
+	// The history database is opened before the logger is built so its sink can
+	// be part of the writer: every log line from here on is mirrored into the
+	// database as well as the file. A failure only disables local history.
+	logw := base
+	if !*once {
+		var herr error
+		logw, herr = app.openHistory(cfg, base, os.Stderr)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "phoneserver: %v\n", herr)
+		}
+	}
+	logger := log.New(logw, "", log.LstdFlags|log.Lmicroseconds)
+	app.logf = logger
 	app.pusher = newPusher(app, logger)
 	app.setupTimezone()
+
+	if app.store != nil {
+		app.store.StartLogFlusher(logger.Printf)
+		app.backfillExistingLogs(cfg, logger)
+	}
 
 	if *once {
 		out, merr := json.MarshalIndent(app.snapshot(), "", "  ")
@@ -648,6 +690,23 @@ func main() {
 		http.MethodGet:  app.handlePushStatus,
 		http.MethodPost: app.handlePushNow,
 	})))
+	mux.HandleFunc("/api/v1/history", app.get(app.handleHistory))
+	mux.HandleFunc("/api/v1/history/metrics", app.get(app.handleHistoryMetrics))
+	mux.HandleFunc("/api/v1/history/logs", app.get(app.handleHistoryLogs))
+	mux.HandleFunc("/api/v1/history/snapshot", app.get(app.handleHistorySnapshot))
+	mux.HandleFunc("/api/v1/history/stats", app.get(app.handleHistoryStats))
+	mux.HandleFunc("/api/v1/history/prune", app.guard(app.dispatch(map[string]http.HandlerFunc{
+		http.MethodPost: app.handleHistoryPrune,
+	})))
+
+	if app.store != nil {
+		app.histStop = make(chan struct{})
+		go app.startHistoryLoop(logger, app.histStop)
+		h := cfg.History.norm()
+		logger.Printf("history: db=%s interval=%ds full=%ds retention=%dd(samples)/%dd(snapshots)/%dd(logs) cap=%dMB",
+			h.DBPath, h.IntervalSeconds, h.FullSeconds,
+			h.RetentionDays, h.SnapshotRetentionDays, h.LogRetentionDays, h.MaxDBMB)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -676,6 +735,14 @@ func main() {
 		os.Exit(1)
 	case sig := <-sigCh:
 		logger.Printf("received %s, shutting down", sig)
+		if app.histStop != nil {
+			close(app.histStop)
+		}
+		if app.store != nil {
+			// Give the batched log writer a moment to drain before closing.
+			time.Sleep(150 * time.Millisecond)
+			app.store.Close()
+		}
 		srv.Close()
 	}
 }

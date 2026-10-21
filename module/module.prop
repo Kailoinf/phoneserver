@@ -1,6 +1,6 @@
 id=phoneserver
 name=Phone Data Server
-version=1.1.6
-versionCode=10016
+version=1.2.0
+versionCode=10020
 author=Kairo
 description=Expose device telemetry (battery, CPU, GPU, memory, storage, thermal, network, Wi-Fi, processes, packages) as JSON over a RESTful HTTP API, plus periodic POST push to your own cloud endpoint. Includes a WebUI in the manager (open the module card, press WebUI), and a browser dashboard on the listen port. Action button shows status + token.

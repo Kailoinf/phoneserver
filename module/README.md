@@ -11,9 +11,9 @@ dependencies, no Python/Node needed on the device).
 
 KernelSU / SukiSU manager: install this zip as a module, then reboot.
 
-    ksud module install /sdcard/phoneserver-1.0.0.zip
+    ksud module install /sdcard/phoneserver-module.zip
 
-State lives in `/data/adb/phoneserver/` (config + logs) — deliberately **outside**
+State lives in `/data/adb/phoneserver/` (config + history.db + logs) — deliberately **outside**
 the module directory, so updating or reinstalling the module keeps your API token
 and push settings.
 
@@ -53,6 +53,11 @@ scriptable from a shell and testable over adb:
     sh webui.sh set-port 9090            # saves, restarts, confirms
     sh webui.sh logs 60 | api-log 60 | clear-logs
     sh webui.sh token
+    sh webui.sh history-panel <metric> <since>   # {stats,series,logs} — one call per refresh
+    sh webui.sh history battery_temp_c,cpu_usage_pct -6h 240
+    sh webui.sh history-stats | history-metrics
+    sh webui.sh history-logs 50 <grep> <since>
+    sh webui.sh history-snapshot <ts> <section> | history-prune
 
 `restart`, `start` and `set-port` do not report success until the API actually
 answers on the new state — if something is wrong you get `ok:false` plus the
@@ -88,6 +93,12 @@ them.
 | PUT | `/api/v1/config` | change push settings, token, TTLs, storage mounts |
 | GET | `/api/v1/push` | push state: counters, last result, last error |
 | POST | `/api/v1/push` | push the current snapshot right now (returns the result) |
+| GET | `/api/v1/history` | query stored samples (`metrics`, `since`, `until`, `limit`, `stats`) |
+| GET | `/api/v1/history/metrics` | the queryable metric column names |
+| GET | `/api/v1/history/logs` | query stored log lines (`grep`, `level`, `since`, `limit`) |
+| GET | `/api/v1/history/snapshot` | the full stored document nearest `ts` (or `section=<name>`) |
+| GET | `/api/v1/history/stats` | db size, row counts, growth rate, battery-cost estimate |
+| POST | `/api/v1/history/prune` | apply the retention policy now |
 
 Read endpoints are GET-only (anything else is a 405) and require the token.
 
@@ -111,7 +122,7 @@ Every interval the phone POSTs:
 ```
 
 Headers: `Content-Type: application/json`, `X-Device-Id`, `X-Seq`, `User-Agent:
-phoneserver/1.0.0`, and `Authorization: Bearer …` when a bearer token is set.
+phoneserver/1.2.0`, and `Authorization: Bearer …` when a bearer token is set.
 Non-2xx answers are retried `retries` times with a 1s/2s/… backoff, and the last
 outcome is always visible at `GET /api/v1/push`. Failed pushes are not queued —
 pull the API if you need a complete history.
@@ -127,6 +138,55 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
 http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 ```
+
+## Local history (SQLite)
+
+The service keeps its own history on the phone, so you do not need a cloud
+server to look at a curve. Everything lives in one SQLite database:
+
+    table       contents                                                   default retention
+    samples     one row per tick, ~65 scalar metrics flattened to columns  30 days
+    snapshots   the complete /api/v1/all document, gzipped into a BLOB     3 days
+    logs        log lines, mirrored live and backfilled from the existing  7 days
+                log files on first start
+
+The database is `/data/adb/phoneserver/history.db` — outside the module
+directory on purpose, so reinstalling or upgrading the module never loses it.
+
+The driver is `modernc.org/sqlite`: SQLite compiled to **pure Go**. That was
+forced by the build method — the binary has to be CGO-free and statically linked
+to be exec'd on Android at all (see Build below), and mattn/go-sqlite3 needs
+CGO plus the NDK. Verified on a real device: WAL on f2fs, cross-process
+durability, and a standard `SQLite format 3` header, so any SQLite client can
+open it (`sqlite3 history.db`, or Python's `sqlite3` module).
+
+    curl -H 'X-API-Key: TOKEN' 'http://PHONE_IP:8080/api/v1/history?metrics=battery_temp_c,cpu_usage_pct&since=-6h&stats=1'
+    curl -H 'X-API-Key: TOKEN' 'http://PHONE_IP:8080/api/v1/history/logs?since=-24h&grep=error'
+    curl -H 'X-API-Key: TOKEN' 'http://PHONE_IP:8080/api/v1/history/snapshot?section=battery'
+
+`since`/`until` accept relative offsets (`-30m`, `-6h`, `-7d`), unix seconds, or
+RFC3339. `points` comes back as `[ts, metric1, metric2, ...]`, oldest first, so
+it can be plotted directly; `columns` maps the positions to names.
+
+**Battery cost, measured rather than guessed** (Snapdragon 8s Gen 4):
+
+    idle 30 s                          0 ticks of process CPU — it is parked
+    one full collection (/api/v1/all)  ~146 ms of process CPU (it spawns getprop,
+                                       cmd wifi and dumpsys)
+    wall time per collection           ~250–300 ms
+    at the default 10 s interval       8640/day ≈ 1261 s CPU/day ≈ 1.46% of one core
+    for comparison, WebUI open (3 s)   ~4.9% of one core
+
+Disk with the default retention: samples ≈ 4 MB/day, snapshots ≈ 44 MB/day
+(~5 KB gzipped each), logs by request volume, and a hard 512 MB cap that evicts
+the oldest snapshots first so it can never fill the device.
+
+If 1.46% of a core matters more to you than completeness, raise
+`history.full_seconds` (keep `interval_seconds` at 10): the in-between ticks then
+take a **cheap path** that only reads sysfs and /proc, no subprocesses, and the
+scalar metrics keep their 10 s cadence. At 10 s / 60 s the estimate drops to
+about 0.3% of a core. Every row carries a `full` column so you always know which
+kind of tick produced it.
 
 ## Units and conventions
 
@@ -169,6 +229,7 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
                                  # set by KernelSU — do not chmod it yourself)
     /data/adb/phoneserver/
       config.json                # 0600
+      history.db                 # SQLite history (+ history.db-wal / -shm)
       logs/phoneserver.log       # rotating, 4 MB × 3
       logs/stdout.log            # binary stdout + watchdog restarts
       watchdog.pid
@@ -184,6 +245,9 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 - `-once` prints a full snapshot to stdout without starting the server, which is
   handy for testing on the device:
   `bin/phoneserver -once -config /data/adb/phoneserver/config.json`
+- History: `sh webui.sh history-stats` for size/rows/growth, `history-prune` to
+  apply retention now. Turning history off entirely is `"history":{"enabled":false}`
+  in the config (takes effect without a restart); changing `db_path` needs one.
 
 ## Troubleshooting
 
@@ -197,12 +261,20 @@ http.server.HTTPServer(("0.0.0.0", 9099), H).serve_forever()
 - **Battery values all zero**: wrong sysfs path for your device — the collector
   expects `/sys/class/power_supply/battery/`.
 - **`packages.error`**: `pm list packages` timed out (30 s); counts are cached.
+- **`/api/v1/history/*` answers 503**: history is switched off (`history.enabled`)
+  or the database could not be opened. Running the service by hand prints the
+  reason to stderr; `/api/v1/history/stats` reports it in `last_error`.
 
 ## Build
 
-    # from the module source tree
+    ./build.sh          # cross-compile + stage into module/ + produce the installable zip
+    # equivalent by hand:
     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o ps-static .
     cp ps-static module/bin/phoneserver
+
+The only dependency is the pure-Go SQLite driver (`modernc.org/sqlite`); the
+first build fetches it (in China: `export GOPROXY=https://goproxy.cn,direct`),
+after that the module cache makes builds offline.
 
 **Do not add `-buildmode=pie`.** Go's PIE output carries
 `PT_INTERP=/lib/ld-linux-aarch64.so.1`, which does not exist on Android (the

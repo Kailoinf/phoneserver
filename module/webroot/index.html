@@ -56,6 +56,8 @@
   #msg.ok{display:block;border-color:#1f6f3f;color:var(--ok)}
   #msg.err{display:block;border-color:#6e2b2b;color:var(--bad)}
   .muted{color:var(--dim);font-size:12px}
+  .sel{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid var(--line);
+    background:var(--bg);color:var(--fg)}
 </style>
 </head>
 <body>
@@ -185,6 +187,37 @@
       <pre id="log">按「查看日志」或「刷新日志」读取。</pre>
     </section>
   </div>
+
+  <div class="grid" style="grid-template-columns:1fr">
+    <section>
+      <h2>历史数据（本机 SQLite）</h2>
+      <div class="inline" style="gap:8px;flex-wrap:wrap;margin-bottom:9px">
+        <select id="h-metric" class="sel" style="flex:1;min-width:160px"></select>
+        <select id="h-range" class="sel" style="min-width:118px">
+          <option value="-1h">最近 1 小时</option>
+          <option value="-6h" selected>最近 6 小时</option>
+          <option value="-24h">最近 24 小时</option>
+          <option value="-7d">最近 7 天</option>
+          <option value="-30d">最近 30 天</option>
+        </select>
+        <button id="h-refresh" class="sec">刷新</button>
+      </div>
+      <canvas id="h-chart" style="width:100%;height:150px;display:block;background:var(--bg);
+        border:1px solid var(--line);border-radius:9px"></canvas>
+      <div id="h-sum" class="muted" style="margin:7px 0 3px">–</div>
+      <div id="h-rows"></div>
+      <div class="inline" style="margin-top:10px;gap:8px">
+        <input id="h-grep" placeholder="检索库内日志，例如 access / error / watchdog" style="flex:1">
+        <button id="h-log-btn" class="sec" style="min-width:76px">检索</button>
+      </div>
+      <div class="btns" style="margin-top:8px">
+        <button id="h-prune" class="sec">立即清理过期数据</button>
+        <button id="h-full" class="sec">查看此刻完整快照</button>
+      </div>
+      <pre id="h-logs">库内日志（最近 1 小时）会显示在这里。</pre>
+    </section>
+  </div>
+
   <p class="muted" id="foot"></p>
 </main>
 
@@ -519,6 +552,177 @@
     });
   }
 
+  /* ------------------------------- history ------------------------------- */
+
+  var HMETRICS = [
+    'battery_temp_c', 'battery_capacity_pct', 'battery_current_a', 'battery_voltage_v',
+    'cpu_usage_pct', 'cpu_load1', 'gpu_busy_pct', 'gpu_temp_c',
+    'mem_used_pct', 'max_temp_c', 'net_rx_bps', 'net_tx_bps', 'wifi_rssi_dbm',
+    'data_free_bytes', 'uptime_s', 'collect_ms', 'proc_count'
+  ];
+  var HLABEL = {
+    'battery_temp_c': '电池温度 °C', 'battery_capacity_pct': '电量 %', 'battery_current_a': '电池电流 A',
+    'battery_voltage_v': '电池电压 V', 'cpu_usage_pct': 'CPU 占用 %', 'cpu_load1': '负载(1分钟)',
+    'gpu_busy_pct': 'GPU 占用 %', 'gpu_temp_c': 'GPU 温度 °C', 'mem_used_pct': '内存占用 %',
+    'max_temp_c': '最高温度 °C', 'net_rx_bps': '下行速率 B/s', 'net_tx_bps': '上行速率 B/s',
+    'wifi_rssi_dbm': 'Wi-Fi 信号 dBm', 'data_free_bytes': 'data 可用空间 B', 'uptime_s': '开机时长 s',
+    'collect_ms': '单次采集耗时 ms', 'proc_count': '进程数'
+  };
+
+  function hLabel(m) { return HLABEL[m] || m; }
+
+  function fillMetrics(list) {
+    var sel = el('h-metric'), cur = sel.value, h = '';
+    for (var i = 0; i < list.length; i++) {
+      h += '<option value="' + list[i] + '">' + hLabel(list[i]) + '</option>';
+    }
+    if (h) sel.innerHTML = h;
+    if (cur) sel.value = cur;
+  }
+  fillMetrics(HMETRICS);
+
+  /* Pull the real column list from the backend; the hardcoded set above is only
+     a fallback so the panel still works if that call fails. */
+  function loadMetricList() {
+    return run('history-metrics').then(function (res) {
+      var j = json(res.stdout);
+      if (j && j.metrics && j.metrics.length) {
+        var pref = HMETRICS.filter(function (m) { return j.metrics.indexOf(m) >= 0; });
+        var rest = j.metrics.filter(function (m) { return pref.indexOf(m) < 0; });
+        fillMetrics(pref.concat(rest));
+      }
+    });
+  }
+
+  function fmtVal(v) {
+    if (v === null || v === undefined || v === '') return '–';
+    if (typeof v === 'string') return v;
+    var n = Number(v);
+    if (!isFinite(n)) return '–';
+    if (Math.abs(n) >= 100000) return fmtBytes(n);
+    return (Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 100) / 100).toString();
+  }
+
+  function drawChart(pts, idx, unit) {
+    var c = el('h-chart');
+    var dpr = window.devicePixelRatio || 1;
+    var w = c.clientWidth || 320, h = 150;
+    c.width = Math.max(1, Math.round(w * dpr));
+    c.height = Math.round(h * dpr);
+    var g = c.getContext('2d');
+    if (!g) return;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+
+    var vals = [], t0 = null, t1 = null;
+    for (var i = 0; i < pts.length; i++) {
+      var ts = Number(pts[i][0]), v = Number(pts[i][idx]);
+      if (!isFinite(ts) || !isFinite(v)) continue;
+      if (t0 === null) t0 = ts;
+      t1 = ts;
+      vals.push([ts, v]);
+    }
+    g.font = '11px monospace';
+    if (vals.length < 2) {
+      g.fillStyle = '#8b98a9';
+      g.fillText(vals.length ? '只有一个采样点，再等一个周期' : '这个时间窗内没有数据', 10, 22);
+      return;
+    }
+    var vmin = Infinity, vmax = -Infinity;
+    for (i = 0; i < vals.length; i++) {
+      if (vals[i][1] < vmin) vmin = vals[i][1];
+      if (vals[i][1] > vmax) vmax = vals[i][1];
+    }
+    if (vmax - vmin < 1e-9) { vmax = vmin + 1; }
+    var pad = 24, span = Math.max(1, t1 - t0);
+    var X = function (ts) { return pad + (ts - t0) / span * (w - pad * 2); };
+    var Y = function (v) { return h - pad - (v - vmin) / (vmax - vmin) * (h - pad * 2); };
+
+    g.strokeStyle = 'rgba(139,152,169,.22)';
+    g.lineWidth = 1;
+    for (var k = 0; k <= 3; k++) {
+      var gy = pad + k * (h - pad * 2) / 3;
+      g.beginPath(); g.moveTo(pad, gy); g.lineTo(w - pad, gy); g.stroke();
+    }
+
+    g.beginPath();
+    g.moveTo(X(vals[0][0]), Y(vals[0][1]));
+    for (i = 1; i < vals.length; i++) g.lineTo(X(vals[i][0]), Y(vals[i][1]));
+    g.strokeStyle = '#58a6ff';
+    g.lineWidth = 1.7;
+    g.stroke();
+    g.lineTo(X(vals[vals.length - 1][0]), h - pad);
+    g.lineTo(X(vals[0][0]), h - pad);
+    g.closePath();
+    g.fillStyle = 'rgba(88,166,255,.15)';
+    g.fill();
+
+    g.fillStyle = '#8b98a9';
+    g.fillText(fmtVal(vmax), 2, pad + 4);
+    g.fillText(fmtVal(vmin), 2, h - pad + 4);
+    var l0 = new Date(vals[0][0] * 1000), l1 = new Date(vals[vals.length - 1][0] * 1000);
+    g.fillText(l0.toLocaleTimeString(), pad, h - 5);
+    g.fillText(l1.toLocaleTimeString(), w - pad - 54, h - 5);
+    var lastX = X(vals[vals.length - 1][0]), lastY = Y(vals[vals.length - 1][1]);
+    g.beginPath(); g.arc(lastX, lastY, 2.6, 0, Math.PI * 2);
+    g.fillStyle = '#58a6ff'; g.fill();
+  }
+
+  function drawHistoryLogs() {
+    var g = el('h-grep').value.trim();
+    return run('history-logs 40 ' + shq(g) + ' -1h').then(function (res) {
+      var j = json(res.stdout);
+      if (!j || !j.lines) { el('h-logs').textContent = (j && j.error) || (res.stdout || res.stderr || '读取失败').slice(0, 300); return; }
+      if (!j.lines.length) { el('h-logs').textContent = '(最近 1 小时' + (g ? '、包含 “' + g + '”' : '') + '没有日志)'; return; }
+      el('h-logs').textContent = j.lines.map(function (l) {
+        return l.time + '  ' + l.level + '  ' + l.line.slice(19, 180);
+      }).join('\n');
+    });
+  }
+
+  function drawHistory(withLogs) {
+    var metric = el('h-metric').value || 'battery_temp_c';
+    var range = el('h-range').value || '-6h';
+    return run('history-panel ' + shq(metric) + ' ' + shq(range) + ' 320').then(function (res) {
+      var j = json(res.stdout);
+      if (!j) { el('h-sum').textContent = '历史后端返回无法解析的内容'; return; }
+      if (j.ok === false) { el('h-sum').textContent = j.error || '历史数据不可用'; return; }
+      var ser = j.series || {}, st = ((j.stats || {}).store) || {}, hc = j.stats || {}, cost = hc.cost_estimate || {};
+      var cols = ser.columns || [];
+      var idx = cols.indexOf(metric);
+      drawChart(ser.points || [], idx < 0 ? 0 : idx, metric);
+      var agg = ser.stats || {};
+      el('h-sum').textContent = (ser.count || 0) + ' 个点 · ' + hLabel(metric) +
+        ' · 最小 ' + fmtVal((agg.min || {})[metric]) +
+        ' · 平均 ' + fmtVal((agg.avg || {})[metric]) +
+        ' · 最大 ' + fmtVal((agg.max || {})[metric]) +
+        ' · 最新 ' + fmtVal((agg.last || {})[metric]);
+
+      var srcs = st.logs_by_source ? Object.keys(st.logs_by_source).map(function (k) {
+        return k + '×' + st.logs_by_source[k];
+      }).join('  ') : '–';
+      rows('h-rows', [
+        ['采样间隔', (hc.interval_seconds || '?') + ' 秒（完整文档 ' + (hc.full_seconds || '?') + ' 秒）'],
+        ['已存 样本/快照/日志', (st.samples || 0) + ' / ' + (st.snapshots || 0) + ' / ' + (st.logs || 0)],
+        ['数据库大小', fmtBytes(st.db_bytes)],
+        ['数据库路径', st.path || '–'],
+        ['保留策略', '样本 ' + (st.retention_days || 0) + ' 天 · 快照 ' + (st.snapshot_retention_days || 0) +
+          ' 天 · 日志 ' + (st.log_retention_days || 0) + ' 天 · 上限 ' + (st.max_db_mb || 0) + ' MB'],
+        ['快照占用（精确）', st.snapshot_bytes_per_day ? fmtBytes(st.snapshot_bytes_per_day) + ' / 天 × ' +
+          (st.snapshot_retention_days || 0) + ' 天保留' : '–'],
+        ['实测增长', st.bytes_per_day ? fmtBytes(st.bytes_per_day) + ' / 天（主库增量）' : (st.growth_note || '–')],
+        ['预计填满上限', st.est_days_to_cap ? Math.round(st.est_days_to_cap) + ' 天' : '–'],
+        ['每天采集次数', (cost.collections_per_day || 0) + ' 次 · 约 ' + (cost.cpu_seconds_per_day || 0) + ' 秒 CPU'],
+        ['平均 CPU 占用', (cost.avg_cpu_percent_of_core || 0) + '% 单核'],
+        ['快照压缩比', st.compression_ratio ? st.compression_ratio + '×' : '–'],
+        ['日志来源', srcs],
+        ['丢弃的日志行', st.dropped_log_lines || 0],
+        ['上次写入错误', hc.last_error || '无']
+      ]);
+      if (withLogs !== false) drawHistoryLogs();
+    });
+  }
+
   /* -------------------------------- wiring -------------------------------- */
 
   el('btn-restart').onclick = function () { act('restart', '重启服务'); };
@@ -589,13 +793,30 @@
     });
   };
 
-  el('foot').textContent = '数据每秒刷新（每 3 秒一次，仅调一次后端）。' +
-    '推送内容与浏览器仪表盘一致：/api/v1/all 的完整快照。';
+  el('foot').textContent = '实时数据每 3 秒刷新一次（只调一次后端）。历史数据存在手机本地 ' +
+    'SQLite 库里，默认每 10 秒存一条，可在上面的面板里查看曲线、检索库内日志、手动清理过期数据。';
+
+  /* history panel wiring */
+  el('h-metric').onchange = function () { drawHistory(false); };
+  el('h-range').onchange = function () { drawHistory(false); };
+  el('h-refresh').onclick = function () { drawHistory(true); };
+  el('h-log-btn').onclick = function () { drawHistoryLogs(); };
+  el('h-grep').onkeydown = function (e) { if (e.key === 'Enter') drawHistoryLogs(); };
+  el('h-prune').onclick = function () {
+    act('history-prune', '清理过期数据').then(function () { drawHistory(true); });
+  };
+  el('h-full').onclick = function () {
+    run("history-snapshot '' battery").then(function (res) {
+      el('h-logs').textContent = (res.stdout || res.stderr || '(无)').slice(0, 4000);
+    });
+  };
 
   /* Bootstrap: initial paint, then poll. Stop polling when hidden. */
   el('token').value = '••••••••••••••••';
   refresh();
   setInterval(function () { if (!document.hidden) refresh(); }, REFRESH_MS);
+  loadMetricList().then(function () { return drawHistory(true); });
+  setInterval(function () { if (!document.hidden) drawHistory(true); }, 60000);
 })();
 </script>
 </body>
