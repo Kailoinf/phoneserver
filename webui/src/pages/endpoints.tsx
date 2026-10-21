@@ -22,10 +22,12 @@ export default function Endpoints() {
   const [outLabel, setOutLabel] = useState("");
   const [tools, setTools] = useState<any>(null);
   const [err, setErr] = useState("");
+  const [probing, setProbing] = useState(true);
 
   useEffect(() => {
     (async () => {
       const r = await apiGet<any>("/endpoints", 20000);
+      setProbing(false);
       if (r.ok && r.data) setEps((r.data as any).endpoints || []);
       else setErr(r.raw || r.error || "读取端点索引失败");
     })();
@@ -61,7 +63,10 @@ export default function Endpoints() {
 
   return (
     <div className="space-y-5">
-      <Card title={"REST 端点（" + eps.length + " 个）"} action={<SmallBtn onClick={() => setQ("")}>清除搜索</SmallBtn>}>
+      <Card
+        title={"REST 端点（" + (probing && !eps.length ? "读取中…" : eps.length + " 个") + "）"}
+        action={<SmallBtn onClick={() => setQ("")}>清除搜索</SmallBtn>}
+      >
         {err ? <Banner tone="warn">{err}</Banner> : null}
         <div className="flex flex-wrap items-end gap-3">
           <Field label="搜索路径或说明" className="flex-1">

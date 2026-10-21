@@ -128,16 +128,21 @@ export default function Config() {
   const [confirmLan, setConfirmLan] = useState(false);
   const [restarting, setRestarting] = useState(false);
 
+  const [phase, setPhase] = useState<"loading" | "ok" | "error">("loading");
+
   const load = async () => {
+    setPhase("loading");
     const r = await apiGet<any>("/api/v1/config", 10000);
     if (r.ok && r.data) {
       const c = (r.data as any).config || r.data;
       setCfg(c);
       setRaw(JSON.stringify(c, null, 2));
       setDirty(new Set());
-      setMsg({ tone: "info", text: "已读取当前配置（token 已脱敏，不会显示明文）" });
+      setMsg({ tone: "info", text: "已读取当前配置（token 已脱敏，不会显示明文）" })
+      setPhase("ok");;
     } else {
-      setMsg({ tone: "warn", text: r.error || "读取配置失败" });
+      setMsg({ tone: "warn", text: "读取配置失败：" + (r.raw || r.error || "没有响应") });
+      setPhase("error");
     }
   };
   useEffect(() => {
@@ -255,7 +260,14 @@ export default function Config() {
   if (!cfg) {
     return (
       <Card title="配置">
-        <Banner tone="info">读取中…如果长时间没反应，检查是否连上了服务端。</Banner>
+        {phase === "error" ? (
+          <Banner tone="warn">
+            {msg?.text || "读取配置失败"}
+            {" —— 上面的连接状态如果是「离线」，先点右上角「连接」填对地址与 token 再来。"}
+          </Banner>
+        ) : (
+          <Banner tone="info">读取中…</Banner>
+        )}
       </Card>
     );
   }

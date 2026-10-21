@@ -25,6 +25,7 @@ export default function Logs() {
   const [note, setNote] = useState("");
   const [levels, setLevels] = useState<string[]>([]);
   const [stdout, setStdout] = useState("");
+  const [probing, setProbing] = useState(true);
 
   const load = async () => {
     const r = await apiGet<any>(
@@ -38,6 +39,7 @@ export default function Logs() {
       if (found.length) setLevels((prev) => Array.from(new Set([...prev, ...found])));
       setErr("");
     } else setErr(r.raw || r.error || "读取失败");
+    setProbing(false);
   };
 
   useEffect(() => {
@@ -97,13 +99,14 @@ export default function Logs() {
           </div>
         </div>
         <Code max="max-h-96">
-          {lines.length
+          {lines.length || !probing
             ? lines.map((l, i) => (
                 <div key={i}>
                   {l.time} [{l.level}] {l.line}
                 </div>
               ))
             : "（没有匹配的日志行）"}
+          {!lines.length && probing ? "读取中…" : null}
         </Code>
         <div className="flex flex-wrap gap-2">
           <Btn variant="outline" onClick={() => void loadStdout()}>读取 stdout.log</Btn>
