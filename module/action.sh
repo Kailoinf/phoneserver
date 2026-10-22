@@ -10,13 +10,21 @@ cfg_str() {
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CFG" 2>/dev/null | head -1
 }
 cfg_bool() {
-    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" "$CFG" 2>/dev/null | head -1
+    # [a-z]* rather than \(true\|false\): toybox sed does not support BRE
+    # alternation, so the previous pattern matched nothing at all.
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([a-z]*\).*/\1/p" "$CFG" 2>/dev/null | head -1
 }
 json_num() {  # json_num <json> <key>
     printf '%s' "$1" | tr -d '\n ' | sed -n "s/.*\"$2\":\([0-9]*\).*/\1/p"
 }
 json_str() {  # json_str <json> <key>
     printf '%s' "$1" | tr -d '\n ' | sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p"
+}
+json_bool() {  # json_bool <json> <key>
+    # Booleans are not quoted, so json_str cannot read them: matching them with
+    # json_str returned empty and the caller's "||=false" fallback then printed
+    # available=false for a bridge that was working.
+    printf '%s' "$1" | tr -d '\n ' | sed -n "s/.*\"$2\":\([a-z]*\).*/\1/p"
 }
 
 LISTEN=$(cfg_str listen)
@@ -69,9 +77,11 @@ if command -v curl >/dev/null 2>&1; then
     # belongs on this screen instead of only inside the WebUI.
     BR=$(curl -s --max-time 8 -H "X-API-Key: $TOKEN" "http://127.0.0.1:$PORT/api/v1/bridge/status" 2>/dev/null)
     if [ -n "$BR" ]; then
-        AVAIL=$(json_str "$BR" available)
-        [ -n "$AVAIL" ] || AVAIL=false
-        echo "bridge   : available=$AVAIL uid=$(json_num "$BR" termux_uid) state=$(json_str "$BR" uid_state)"
+        AVAIL=$(json_bool "$BR" available)
+        [ -n "$AVAIL" ] || AVAIL=unknown
+        CAM=$(json_bool "$BR" camera_allowed_now)
+        MIC=$(json_bool "$BR" mic_allowed_now)
+        echo "bridge   : available=$AVAIL camera=$CAM mic=$MIC uid=$(json_num "$BR" termux_uid) state=$(json_str "$BR" uid_state)"
     fi
 
     ST=$(curl -s --max-time 8 -H "X-API-Key: $TOKEN" "http://127.0.0.1:$PORT/api/v1/stream/status" 2>/dev/null)
