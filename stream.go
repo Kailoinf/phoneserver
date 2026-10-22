@@ -301,6 +301,13 @@ type streamClient struct {
 	done    chan struct{}
 	once    sync.Once
 	dropped atomic.Int64
+	// started flips once this viewer has been sent a key frame together with the
+	// encoder's current parameter sets. Until then publish drops frames for this
+	// client only: a viewer that joins a running encoder mid-GOP would otherwise
+	// receive delta frames referencing a picture it never saw, and its decoder
+	// would show nothing until the encoder happened to emit an IDR (verified on
+	// device with ffprobe: "non-existing PPS 0 referenced", no frame decoded).
+	started atomic.Bool
 }
 
 // offer enqueues a frame without ever blocking. When the queue is full the
@@ -354,6 +361,17 @@ type streamEncoder struct {
 
 	mu      sync.Mutex
 	clients map[*streamClient]struct{}
+	// spsNAL/ppsNAL are the most recent parameter sets and params is their
+	// concatenation, kept so a viewer that joins mid-stream can be bootstrapped.
+	spsNAL []byte
+	ppsNAL []byte
+	params []byte
+	// keyAU is the most recent access unit that carried an IDR slice. A viewer
+	// that joins a running encoder is handed this first (plus params), so it
+	// paints immediately instead of waiting for the next key frame — on a static
+	// screen that wait measured in whole seconds on device, which looks exactly
+	// like a broken stream.
+	keyAU   []byte
 	closed  bool
 	lastErr string
 	idle    *time.Timer
@@ -472,15 +490,87 @@ func (e *streamEncoder) publish(frame []byte) {
 	e.frames.Add(1)
 	e.bytes.Add(int64(len(frame)))
 
+	sps, pps, idr := inspectAccessUnit(frame)
+
 	e.mu.Lock()
+	if len(sps) > 0 || len(pps) > 0 {
+		// Rebuild rather than mutate: viewers already queued the previous slice
+		// and must keep seeing the bytes they were handed.
+		if len(sps) > 0 {
+			e.spsNAL = sps
+		}
+		if len(pps) > 0 {
+			e.ppsNAL = pps
+		}
+		params := make([]byte, 0, len(e.spsNAL)+len(e.ppsNAL))
+		params = append(params, e.spsNAL...)
+		params = append(params, e.ppsNAL...)
+		e.params = params
+	}
+	if idr {
+		// Copy: the splitter reuses its buffer, and this slice outlives the call.
+		e.keyAU = append([]byte(nil), frame...)
+	}
+	params := e.params
+	keyAU := e.keyAU
 	cs := make([]*streamClient, 0, len(e.clients))
 	for c := range e.clients {
 		cs = append(cs, c)
 	}
 	e.mu.Unlock()
+
 	for _, c := range cs {
+		if !c.started.Load() {
+			key := keyAU
+			fromCache := key != nil
+			if !fromCache {
+				if !idr {
+					continue // a delta frame alone is undecodable; wait for a key frame
+				}
+				key = frame
+			}
+			if len(params) > 0 {
+				c.offer(params) // in-band SPS/PPS so the decoder can configure itself
+			}
+			c.offer(key)
+			c.started.Store(true)
+			if !fromCache {
+				continue // key IS the live frame and has just been queued
+			}
+		}
 		c.offer(frame)
 	}
+}
+
+// inspectAccessUnit scans one access unit in Annex-B form for its IDR slice and
+// for SPS (type 7) / PPS (type 8) parameter sets, which are needed in band by a
+// decoder that joins mid-stream. Allocation happens only when parameter sets are
+// present, i.e. about once per GOP, not per frame.
+func inspectAccessUnit(b []byte) (sps, pps []byte, idr bool) {
+	for i := 0; i+3 < len(b); i++ {
+		if b[i] != 0 || b[i+1] != 0 || b[i+2] != 1 {
+			continue
+		}
+		switch b[i+3] & 0x1f {
+		case 5:
+			idr = true
+		case 7, 8:
+			end := len(b)
+			for j := i + 3; j+2 < len(b); j++ {
+				if b[j] == 0 && b[j+1] == 0 && b[j+2] == 1 {
+					end = j
+					break
+				}
+			}
+			nal := append([]byte(nil), b[i:end]...)
+			if b[i+3]&0x1f == 7 {
+				sps = nal
+			} else {
+				pps = nal
+			}
+		}
+	}
+	return
 }
 
 // run reads the encoder's stdout, splits it into access units and fans them

@@ -127,9 +127,9 @@ type FilesConfig struct {
 type MCPConfig struct {
 	// HTTP exposes the MCP endpoint next to the REST API (POST /mcp).
 	// stdio mode (`phoneserver -mcp`) works regardless of this flag.
-	HTTP     bool `json:"http"`
-	ReadOnly bool `json:"read_only"`
-	Path     string
+	HTTP     bool   `json:"http"`
+	ReadOnly bool   `json:"read_only"`
+	Path     string `json:"path"`
 }
 
 type Config struct {
