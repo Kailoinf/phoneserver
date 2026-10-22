@@ -7,7 +7,7 @@
  * reload; the KernelSU WebView cannot do history.pushState reliably.
  */
 import { useEffect, useState } from "preact/hooks";
-import { boot, useApiState, touch, apiGet, state as apiState } from "./api";
+import { boot, useApiState, touch, apiGet, servedOrigin, state as apiState } from "./api";
 import { Banner, Btn, Card, Field, INPUT, Row, SmallBtn } from "./components/ui";
 import Dashboard from "./pages/dashboard";
 import Stream from "./pages/stream";
@@ -118,6 +118,9 @@ export function App() {
       window.localStorage.setItem("phoneserver.base", apiState.base);
       window.localStorage.setItem("phoneserver.token", apiState.token);
       window.localStorage.setItem("phoneserver.mode", "http");
+      // Typing an address is a deliberate choice: keep it even though a served
+      // page would otherwise follow its own origin.
+      window.localStorage.setItem("phoneserver.base.manual", "1");
     } catch {
       /* private mode */
     }
@@ -200,8 +203,32 @@ export function App() {
                   onInput={(e) => setTok((e.target as HTMLInputElement).value)}
                 />
               </Field>
+              {servedOrigin() ? (
+                <Row label="页面地址（推荐）" value={servedOrigin()} mono tone="good" />
+              ) : (
+                <Row label="页面来源" value="本地文件（管理器 WebView 或下载的页面）" tone="muted" />
+              )}
               <Row label="当前模式" value={s.mode === "ksu" ? "管理器 WebView" : "浏览器直连"} tone="muted" />
               <div className="flex justify-end gap-2">
+                {servedOrigin() ? (
+                  <Btn
+                    variant="outline"
+                    onClick={() => {
+                      setBase(servedOrigin());
+                      setTok(apiState.token);
+                      try {
+                        window.localStorage.removeItem("phoneserver.base.manual");
+                        window.localStorage.setItem("phoneserver.base", servedOrigin());
+                      } catch {
+                        /* private mode */
+                      }
+                      apiState.base = servedOrigin();
+                      touch();
+                    }}
+                  >
+                    用当前页面地址
+                  </Btn>
+                ) : null}
                 <Btn variant="outline" onClick={() => setShowSetup(false)}>
                   取消
                 </Btn>

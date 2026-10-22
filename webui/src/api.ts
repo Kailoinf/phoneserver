@@ -56,6 +56,9 @@ export interface ApiState {
 
 const LS = {
   base: "phoneserver.base",
+  // "1" means the user typed an address in the connection dialog and meant it;
+  // without this flag a served page always follows its own origin instead.
+  manual: "phoneserver.base.manual",
   token: "phoneserver.token",
   moddir: "phoneserver.moddir",
   mode: "phoneserver.mode",
@@ -65,6 +68,21 @@ const LS = {
 
 export const DEFAULT_BASE = "http://127.0.0.1:8080";
 export const DEFAULT_MODDIR = "/data/adb/modules/phoneserver";
+
+/** The origin this page was served from, or "" when it is a local file. */
+export function servedOrigin(): string {
+  const p = window.location.protocol;
+  return p === "http:" || p === "https:" ? window.location.origin : "";
+}
+
+export function isLoopbackURL(u: string): boolean {
+  try {
+    const h = new URL(u).hostname;
+    return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
 
 function ls(key: string, fallback = ""): string {
   try {
@@ -522,10 +540,26 @@ export async function boot(): Promise<void> {
     }
   } else {
     state.mode = "http";
-    state.base = ls(LS.base, DEFAULT_BASE);
+    // The daemon serves this page, so the address it was served from always
+    // reaches it. A stored value only wins when the user set it on purpose
+    // (checked the box in the connection dialog); otherwise, opening the UI at
+    // http://<phone>:8080/ui/ kept talking to a stale 127.0.0.1 and reported
+    // "离线" while the server was up and listening on 0.0.0.0.
+    const origin = servedOrigin();
+    const stored = ls(LS.base, "");
+    const manual = ls(LS.manual, "") === "1";
+    if (origin && manual && stored) {
+      state.base = stored;
+      state.source = "直连 API（手动指定 " + stored + "）";
+    } else if (origin) {
+      state.base = origin;
+      state.source = "直连 API（跟随页面地址 " + origin + "）";
+    } else {
+      state.base = stored || DEFAULT_BASE;
+      state.source = "直连 API（本地文件，用 localStorage 里的地址）";
+    }
     state.token = ls(LS.token, "");
     state.port = portOf(state.base, 8080);
-    state.source = "直连 API（localStorage）";
     state.bootError = "";
   }
   state.ready = true;
