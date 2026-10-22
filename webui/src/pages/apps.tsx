@@ -97,9 +97,18 @@ export default function Apps() {
             <tbody>
               {filtered.slice(0, 400).map((a) => (
                 <tr key={a.package} className="border-b border-slate-100 dark:border-slate-800">
-                  <Td mono>{a.package}</Td>
-                  <Td>{a.system ? <Pill>系统</Pill> : <Pill tone="info">用户</Pill>}</Td>
-                  <Td>{a.disabled ? <Pill tone="bad">已禁用</Pill> : <Pill tone="good">正常</Pill>}</Td>
+                  {/* On a phone-width screen the table was 663 px wide and had to be
+                      scrolled sideways; the two flag columns fold under the name
+                      instead of forcing that scroll. */}
+                  <Td mono>
+                    <span className="break-all">{a.package}</span>
+                    <span className="sm:hidden mt-1 flex gap-1">
+                      {a.system ? <Pill>系统</Pill> : <Pill tone="info">用户</Pill>}
+                      {a.disabled ? <Pill tone="bad">已禁用</Pill> : null}
+                    </span>
+                  </Td>
+                  <Td className="hidden sm:table-cell">{a.system ? <Pill>系统</Pill> : <Pill tone="info">用户</Pill>}</Td>
+                  <Td className="hidden sm:table-cell">{a.disabled ? <Pill tone="bad">已禁用</Pill> : <Pill tone="good">正常</Pill>}</Td>
                   <Td>
                     <button className="text-xs text-sky-600 dark:text-sky-400 hover:underline" onClick={() => void act1("启动 " + a.package, "/apps/launch", { package: a.package })}>启动</button>
                     <span className="text-slate-300 dark:text-slate-700 px-1">|</span>

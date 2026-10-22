@@ -57,6 +57,21 @@ interface HStats {
 
 const dash = (v: any) => (v === undefined || v === null || v === "" ? "—" : v);
 
+// The kernel release is the useful part; the full "Linux version … (kleaf@…)
+// (Android (…) clang version …) #1 SMP PREEMPT …" string is 300+ characters and
+// belongs behind a disclosure, not in a grid cell.
+const kernelRelease = (raw: unknown): string => {
+  const s = String(raw || "");
+  const m = s.match(/Linux version\s+(\S+)/);
+  return m ? m[1] : s.split(" ")[0] || "";
+};
+// "6.6.118-android15-8-ge56cf6b09cca-…" is still 47 characters: the grid cell
+// gets the numeric version and the release string goes on a detail row.
+const kernelNumber = (rel: string): string => {
+  const m = rel.match(/^(\d+\.\d+(\.\d+)?)/);
+  return m ? m[1] : rel;
+};
+
 export default function Dashboard() {
   const s = useApiState();
   const [all, setAll] = useState<AllDoc | null>(null);
@@ -105,6 +120,9 @@ export default function Dashboard() {
   const net = all?.network || {};
   const st = stats?.store || {};
   const cap = Number(b.capacity_percent ?? NaN);
+  const kernelRaw = String(sys.kernel || d.kernel || "");
+  const kernelRel = kernelRelease(kernelRaw);
+  const kernelShort = kernelNumber(kernelRel);
 
   return (
     <div className="space-y-5">
@@ -124,7 +142,7 @@ export default function Dashboard() {
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <Stat label="型号" value={dash(d.market_name || d.model)} />
           <Stat label="Android" value={dash(d.android_release)} unit={d.android_sdk ? "SDK " + d.android_sdk : ""} />
-          <Stat label="内核版本" value={dash(d.kernel || (sys.kernel ? String(sys.kernel).match(/Linux version (\S+)/)?.[1] : ""))} />
+          <Stat label="内核" value={dash(kernelShort)} />
           <Stat label="设备代号" value={dash(d.device)} />
           <Stat label="开机时长" value={fmtDur(sys.uptime_seconds)} tone="muted" />
           <Stat label="服务" value={health?.server_version ? "v" + health.server_version : "—"} tone={health ? "good" : "bad"} />
@@ -256,6 +274,11 @@ export default function Dashboard() {
         </div>
         <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2">
           <Row label="开机时间" value={dash(sys.boot_time)} mono />
+          <Row label="内核 release" value={kernelRel || "—"} mono tone="muted" />
+          <details className="text-xs">
+            <summary className="cursor-pointer text-slate-500 dark:text-slate-400">内核完整 build 字符串</summary>
+            <pre className="pt-2 whitespace-pre-wrap break-all text-xs">{kernelRaw || "—"}</pre>
+          </details>
           <Row label="样本行数" value={dash(st.samples)} mono />
           <Row label="快照行数" value={dash(st.snapshots)} mono />
           <Row label="日志行数" value={dash(st.logs)} mono />

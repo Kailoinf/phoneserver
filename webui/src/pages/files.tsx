@@ -116,10 +116,15 @@ export default function Files() {
               {(root?.shares || []).map((sh: Share) => (
                 <tr key={sh.name} className={"border-b border-slate-100 dark:border-slate-800 " + (sh.name === share ? "bg-slate-50 dark:bg-black" : "")}>
                   <Td mono>{sh.name}</Td>
-                  <Td mono>{sh.path}</Td>
-                  <Td>{sh.readable === false ? "否" : "是"}</Td>
-                  <Td>{sh.writable === false ? "否" : "是"}</Td>
-                  <Td mono>{sh.entries ?? "—"}</Td>
+                  <Td mono>
+                    <span className="break-all">{sh.path}</span>
+                    <span className="sm:hidden mt-1 block text-xs text-slate-500 dark:text-slate-500">
+                      读 {sh.readable === false ? "否" : "是"} · 写 {sh.writable === false ? "否" : "是"} · 条目 {sh.entries ?? "—"}
+                    </span>
+                  </Td>
+                  <Td className="hidden sm:table-cell">{sh.readable === false ? "否" : "是"}</Td>
+                  <Td className="hidden sm:table-cell">{sh.writable === false ? "否" : "是"}</Td>
+                  <Td className="hidden sm:table-cell" mono>{sh.entries ?? "—"}</Td>
                   <Td>
                     <SmallBtn onClick={() => { setShare(sh.name); setPath(""); }}>浏览</SmallBtn>
                   </Td>

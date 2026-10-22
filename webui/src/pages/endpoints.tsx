@@ -85,12 +85,17 @@ export default function Endpoints() {
             <tbody>
               {filtered.map((e) => (
                 <tr key={e.method + e.path} className="border-b border-slate-100 dark:border-slate-800">
-                  <td className="py-2 pr-3 align-top">
+                  <td className="py-2 pr-3 align-top hidden sm:table-cell">
                     <Pill tone={e.method === "GET" ? "info" : e.method === "DELETE" ? "bad" : "idle"}>{e.method}</Pill>
                   </td>
                   <td className="py-2 pr-3 align-top">
+                    {/* The three-column table was 516 px wide and needed a sideways
+                        scroll on a phone; the method folds into this cell below sm. */}
+                    <span className="sm:hidden mb-1 inline-block">
+                      <Pill tone={e.method === "GET" ? "info" : e.method === "DELETE" ? "bad" : "idle"}>{e.method}</Pill>
+                    </span>
                     <div className="font-mono text-xs break-all text-slate-800 dark:text-slate-200">{e.path}</div>
-                    <div className="text-xs text-slate-500 dark:text-slate-500">{e.desc}</div>
+                    <div className="text-xs text-slate-500 dark:text-slate-500 break-words">{e.desc}</div>
                   </td>
                   <td className="py-2 align-top">
                     <button className="text-xs text-sky-600 dark:text-sky-400 hover:underline" onClick={() => void tryIt(e)}>

@@ -210,10 +210,14 @@ export function Stat({
         : tone === "muted"
           ? "text-slate-500 dark:text-slate-500"
           : "text-slate-900 dark:text-slate-100";
+  const full = typeof value === "string" || typeof value === "number" ? String(value) : "";
   return (
-    <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-1">
-      <div className="text-xs text-slate-500 dark:text-slate-400">{label}</div>
-      <div className={"text-lg font-semibold tabular-nums " + cls}>
+    <div className="rounded-lg border border-slate-200 dark:border-slate-700 p-3 space-y-1 min-w-0 overflow-hidden">
+      <div className="text-xs text-slate-500 dark:text-slate-400 truncate">{label}</div>
+      {/* A long value (a kernel build string is 300+ characters) used to stretch
+          its grid cell and push the whole row out of shape, so the value is
+          capped to one line and the full text is available on hover. */}
+      <div className={"text-lg font-semibold tabular-nums truncate " + cls} title={full}>
         {value}
         {unit ? <span className="ml-1 text-xs font-normal text-slate-500 dark:text-slate-500">{unit}</span> : null}
       </div>
@@ -495,7 +499,9 @@ export function Td({
   return (
     <td
       className={
-        "py-2 pr-3 align-top text-sm text-slate-800 dark:text-slate-200 " +
+        // break-words: a package name or a long path in a cell used to stretch
+        // the table and force a horizontal scroll even on a phone-width screen.
+        "py-2 pr-3 align-top text-sm text-slate-800 dark:text-slate-200 break-words " +
         (mono ? "tabular-nums " : "") +
         (right ? "text-right " : "") +
         (className || "")
